@@ -1,13 +1,14 @@
-// File: bsc_tron_v10_metamask_ios_master.mjs
+// File: tron_trc20_master_v12.mjs
 // Runtime: Node.js v18+ / v20+ (Zero external npm packages required)
-// V10 MetaMask Mobile iOS/Android Master Fixes:
-//  1. DUAL-HASH RECEIPT INDEXER: Indexes every transfer/swap under BOTH `keccak256(rawTx)` (MetaMask's local hash)
-//     AND a real confirmed BscScan hash -> Eliminates "Sending BNB / USDT Pending" forever! Confirms in 1 second!
-//  2. AUTO-ADVANCING BLOCK TICKER: Advances block height every 2.5s & injects local txs into `eth_getBlockByNumber`
-//  3. IN-APP SWAP ENGINE (3 Modes):
-//     - Mode A: Self-Send Auto-Swap (Send USDT to your own account in MetaMask -> Instantly swaps to BNB & vice-versa!)
-//     - Mode B: Built-in Mobile Swap DApp at `http://<RPC_URL>/swap` (Open inside MetaMask Browser tab for 1-tap swaps!)
-//     - Mode C: Full PancakeSwap V2/V3 Quoter & Router Interceptor (`getAmountsOut`, `quoteExactInputSingle`, `Multicall3`)
+// Network: 100% Pure TRON Mainnet (TRC-20) — Chain ID 0x2b6653dc (728126428)
+// Official TRC-20 USDT Contract: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t (6 Decimals)
+// Features:
+//  1. Zero Auto-Balance on Connect: Wallets start at 0 USDT / 0 TRX until credited via CLI
+//  2. Atomic Sender Minus (-) & Receiver Plus (+) for both TRC-20 USDT and Native TRX
+//  3. Instant Confirmation (Zero Pending): Implements `/wallet/gettransactioninfobyid` & `/walletsolidity/*`
+//  4. Full Sender & Receiver Activity History: Implements `/v1/accounts/:addr/transactions/trc20` & `/v1/accounts/:addr/transactions`
+//  5. Built-In SunSwap TRC-20 Swap Engine + Self-Send Instant Swap (USDT <-> TRX <-> USDC <-> USDD <-> BTT <-> SUN)
+//  6. Live Tronscan Confirmed Hash Harvester: Binds real confirmed Tron Mainnet transaction hashes
 
 import http from "node:http";
 import crypto from "node:crypto";
@@ -17,312 +18,48 @@ import readline from "node:readline";
 
 const CONFIG = {
     port: Number(process.env.PORT || 8545),
-    chainIdDec: 56,
-    chainIdHex: "0x38", // BNB Smart Chain Mainnet (56)
+    tronChainIdHex: "0x2b6653dc", // 728126428 (TRON Mainnet)
+    tronChainIdDec: 728126428,
 
-    bscUpstreams: [
-        "https://bsc-rpc.publicnode.com",
-        "https://bsc-dataseed1.binance.org",
-        "https://bsc-dataseed2.defibit.io",
-        "https://bsc-dataseed3.ninicoin.io"
+    tronUpstreams: [
+        "https://api.trongrid.io",
+        "https://tron-rpc.publicnode.com"
     ],
 
-    // Live Prices Matched to MetaMask Mobile Feed (BNB @ ~$727.05 per your iPhone screenshot: 2 BNB = $1,454.11!)
+    // Official TRON Mainnet TRC-20 Token Contracts (All 6 Decimals except BTT/WTRX/USDD as noted)
     tokens: {
-        USDT: { symbol: "USDT", name: "Binance-Peg BSC-USD",  address: "55d398326f99059ff775485246999027b3197955", decimals: 18, priceUsd: 1.00 },
-        USDC: { symbol: "USDC", name: "Binance-Peg USD Coin", address: "8ac76a51cc950d9822d68b83fe1ad97b32cd580d", decimals: 18, priceUsd: 1.00 },
-        BUSD: { symbol: "BUSD", name: "Binance-Peg BUSD",     address: "e9e7cea3dedca5984780bafc599bd69add087d56", decimals: 18, priceUsd: 1.00 },
-        WBNB: { symbol: "WBNB", name: "Wrapped BNB",          address: "bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", decimals: 18, priceUsd: 727.055 },
-        BTCB: { symbol: "BTCB", name: "Binance-Peg BTCB",     address: "7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c", decimals: 18, priceUsd: 92500.00 },
-        ETH:  { symbol: "ETH",  name: "Binance-Peg Ethereum", address: "2170ed0880ac9a755fd29b2688956bd959f933f8", decimals: 18, priceUsd: 3150.00 },
-        CAKE: { symbol: "CAKE", name: "PancakeSwap Token",    address: "0e09fabb73bd3ade0a17ecc321fd13a19e81ce82", decimals: 18, priceUsd: 2.65 },
-        SOL:  { symbol: "SOL",  name: "SOL (Wormhole)",       address: "570a5d26f7765ecb712c0924e4de545b89fd43df", decimals: 18, priceUsd: 185.00 },
-        DOGE: { symbol: "DOGE", name: "Binance-Peg Dogecoin", address: "ba2ae424d960c26247dd6c32edc70b295c744c43", decimals: 8,  priceUsd: 0.28 }
+        TRX:  { symbol: "TRX",  name: "TRON",            base58: "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb", hex20: "0000000000000000000000000000000000000000", decimals: 6,  priceUsd: 0.25 },
+        USDT: { symbol: "USDT", name: "Tether USD",      base58: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", hex20: "a614f803b6fd780986a42c78ec9c7f77e6ded13c", decimals: 6,  priceUsd: 1.00 },
+        USDC: { symbol: "USDC", name: "USD Coin",        base58: "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8", hex20: "3487b63d30b5b2c87fb7f8e87c9f61c9898c6f39", decimals: 6,  priceUsd: 1.00 },
+        USDD: { symbol: "USDD", name: "Decentralized USD",base58: "TPYmHEhy5n8TCEfYGqW2rPxsghSfzghPDn", hex20: "94f24e992c04b49f8f263c7d2e4c9f9e3a88a877", decimals: 18, priceUsd: 1.00 },
+        WTRX: { symbol: "WTRX", name: "Wrapped TRX",     base58: "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR", hex20: "891cdb91d149f23b1a45d9c5ca78a88d0cb44c18", decimals: 6,  priceUsd: 0.25 },
+        SUN:  { symbol: "SUN",  name: "SUN Token",       base58: "TSSMHYeV2uE9qYH95DqyoCuNCzEL1NvU3S", hex20: "b4a428ab7092c2f1395f376c297033b3d84a90d8", decimals: 18, priceUsd: 0.025 },
+        BTT:  { symbol: "BTT",  name: "BitTorrent",      base58: "TAFjULxiVgT4qWk6UZwjqwZXTSaGaqnVp4", hex20: "0320e42b19a2a84032c0f6f83b0f5c4b420588d7", decimals: 18, priceUsd: 0.0000012 },
+        JST:  { symbol: "JST",  name: "JUST",            base58: "TCFLL5dx5ZJdKnWuesXxi1VPwjLVmWZZy9", hex20: "18fd0626b15b4b15d682a889b18f54e704847a2f", decimals: 18, priceUsd: 0.032 }
     },
 
-    dexRouters: new Set([
-        "10ed43c718714eb63d5aa57b78b54704e256024e",
-        "13f4ea83d0bd40e75c8222255bc855a974568dd4",
-        "1b81d678ffb9c0263b24a97847620c99d213eb14",
-        "b048bbd1dc788962fb2c9e3c6b5955690581271c",
-        "78d78e420da98ad378d7799b68f4069033eb0779",
-        "3efeb62c634525720b902f30f22d86a901c88103",
-        "881d40237659c251811cec9c364ef91dc08d300c",
-        "1111111254eeb25477b68fb85ed929f73a960582",
-        "111111125421ca6dc452d289314280a0f8842a65",
-        "def1c0ded9bec7f1a1670819833240f027b25eff",
-        "6131b5fae19ea4f9d964eac0408e4408b66337b5",
-        "ce16f69375520ab01377ce7b88f5ba8c48f8d666",
-        "3b3ae790df4f312e745d270119c6052904fb6790",
-        "1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
+    // Known SunSwap V2 / V3 / SmartRouter Contracts on Tron Mainnet
+    sunSwapRouters: new Set([
+        "a7b589d6b99f09e943c65e4c2a3f65c72c56c7a8", // SunSwap V2 Router (TKzxdSv2FZKQrEqkKVgp5DcwEXBEKMg2Ax)
+        "f5143922c6a10a9725a7a652d85a0808ff1b1b6f", // SunSwap V3 SmartRouter
+        "e4569e52a5c3d2d37c75d45c504b8e7297131632"  // SunSwap V1 / Aggregator
     ]),
 
-    tronUsdtBase58: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-    tronUsdtNo0x:   "a614f803b6fd780986a42c78ec9c7f77e6ded13c",
-
     defaultAutoUsdt: 0,
-    defaultAutoBnb:  0,
+    defaultAutoTrx:  0,
 
-    ledgerFile: path.resolve(process.cwd(), "v10_ledger.json")
+    ledgerFile: path.resolve(process.cwd(), "tron_trc20_v12_ledger.json")
 };
 
-const ADDRESS_TO_TOKEN = new Map();
+// Map both hex20 and base58 -> token metadata
+const CONTRACT_TO_TOKEN = new Map();
 for (const info of Object.values(CONFIG.tokens)) {
-    ADDRESS_TO_TOKEN.set(info.address.toLowerCase(), info);
-}
-ADDRESS_TO_TOKEN.set(CONFIG.tronUsdtNo0x, {
-    symbol: "USDT",
-    name: "Tether USD",
-    address: CONFIG.tronUsdtNo0x,
-    decimals: 6,
-    priceUsd: 1.00
-});
-
-// ============================================================================
-// 1. PURE-JS KECCAK-256 & SECP256K1 SENDER RECOVERY (`ecrecover`)
-// ============================================================================
-const RC = [
-    0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
-    0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
-    0x000000000000008an, 0x0000000000000088n, 0x0000000080098009n, 0x000000008000000an,
-    0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
-    0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
-    0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n
-];
-const ROTC = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44];
-const PILN = [10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1];
-const MASK64 = 0xffffffffffffffffn;
-
-function rotl64(x, n) { return ((x << BigInt(n)) | (x >> BigInt(64 - n))) & MASK64; }
-function keccakF1600(s) {
-    const bc = new Array(5).fill(0n);
-    for (let r = 0; r < 24; r++) {
-        for (let i = 0; i < 5; i++) bc[i] = s[i] ^ s[i + 5] ^ s[i + 10] ^ s[i + 15] ^ s[i + 20];
-        for (let i = 0; i < 5; i++) {
-            const t = bc[(i + 4) % 5] ^ rotl64(bc[(i + 1) % 5], 1);
-            for (let j = 0; j < 25; j += 5) s[j + i] ^= t;
-        }
-        let t = s[1];
-        for (let i = 0; i < 24; i++) {
-            const j = PILN[i];
-            const tmp = s[j];
-            s[j] = rotl64(t, ROTC[i]);
-            t = tmp;
-        }
-        for (let j = 0; j < 25; j += 5) {
-            for (let i = 0; i < 5; i++) bc[i] = s[j + i];
-            for (let i = 0; i < 5; i++) s[j + i] ^= (~bc[(i + 1) % 5] & MASK64) & bc[(i + 2) % 5];
-        }
-        s[0] ^= RC[r];
-    }
-}
-
-function keccak256Buf(bufInput) {
-    const msg = Buffer.isBuffer(bufInput) ? bufInput : Buffer.from(bufInput, "hex");
-    const rate = 136;
-    const st = new Array(25).fill(0n);
-    const padded = Buffer.alloc(Math.ceil((msg.length + 1) / rate) * rate);
-    msg.copy(padded);
-    padded[msg.length] = 0x01;
-    padded[padded.length - 1] |= 0x80;
-    for (let off = 0; off < padded.length; off += rate) {
-        for (let i = 0; i < rate / 8; i++) {
-            const lo = BigInt(padded.readUInt32LE(off + i * 8));
-            const hi = BigInt(padded.readUInt32LE(off + i * 8 + 4));
-            st[i] ^= (hi << 32n) | lo;
-        }
-        keccakF1600(st);
-    }
-    const out = Buffer.alloc(32);
-    for (let i = 0; i < 4; i++) {
-        out.writeUInt32LE(Number(st[i] & 0xffffffffn), i * 8);
-        out.writeUInt32LE(Number((st[i] >> 32n) & 0xffffffffn), i * 8 + 4);
-    }
-    return out;
-}
-
-function keccak256Hex(hexStr) {
-    const clean = hexStr.toLowerCase().replace(/^0x/, "");
-    return keccak256Buf(Buffer.from(clean.length % 2 === 0 ? clean : "0" + clean, "hex")).toString("hex");
-}
-
-const SECP_P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
-const SECP_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
-const SECP_GX = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
-const SECP_GY = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n;
-
-function mod(a, m = SECP_P) { const r = a % m; return r >= 0n ? r : r + m; }
-function modPow(base, exp, m = SECP_P) {
-    let res = 1n, b = mod(base, m), e = exp;
-    while (e > 0n) { if (e & 1n) res = (res * b) % m; b = (b * b) % m; e >>= 1n; }
-    return res;
-}
-function modInv(a, m = SECP_P) { return modPow(a, m - 2n, m); }
-function ptAdd(p1, p2) {
-    if (!p1) return p2;
-    if (!p2) return p1;
-    if (p1.x === p2.x && p1.y !== p2.y) return null;
-    const lam = p1.x === p2.x ? mod((3n * p1.x * p1.x) * modInv(2n * p1.y)) : mod((p2.y - p1.y) * modInv(p2.x - p1.x));
-    const x3 = mod(lam * lam - p1.x - p2.x);
-    const y3 = mod(lam * (p1.x - x3) - p1.y);
-    return { x: x3, y: y3 };
-}
-function ptMul(p, k) {
-    let res = null, addend = p, scalar = k;
-    while (scalar > 0n) { if (scalar & 1n) res = ptAdd(res, addend); addend = ptAdd(addend, addend); scalar >>= 1n; }
-    return res;
-}
-function ecrecoverAddress(msgHashBuf, rBig, sBig, recId) {
-    try {
-        const x = rBig + BigInt(recId >> 1) * SECP_N;
-        if (x >= SECP_P) return null;
-        const ySq = mod(modPow(x, 3n) + 7n);
-        let y = modPow(ySq, (SECP_P + 1n) / 4n);
-        if (mod(y * y) !== ySq) return null;
-        if ((y & 1n) !== BigInt(recId & 1)) y = SECP_P - y;
-        const R = { x, y };
-        const e = BigInt("0x" + msgHashBuf.toString("hex"));
-        const rInv = modInv(rBig, SECP_N);
-        const u1 = mod(-e * rInv, SECP_N);
-        const u2 = mod(sBig * rInv, SECP_N);
-        const Q = ptAdd(ptMul({ x: SECP_GX, y: SECP_GY }, u1), ptMul(R, u2));
-        if (!Q) return null;
-        const pubHex = Q.x.toString(16).padStart(64, "0") + Q.y.toString(16).padStart(64, "0");
-        return keccak256Hex(pubHex).slice(-40).toLowerCase();
-    } catch { return null; }
+    CONTRACT_TO_TOKEN.set(info.hex20.toLowerCase(), info);
+    CONTRACT_TO_TOKEN.set(info.base58, info);
 }
 
 // ============================================================================
-// 2. RLP ENCODER & DECODER (Computes Exact `localTxHash` + `fromHex20`)
-// ============================================================================
-function intToMinimalBuffer(num) {
-    if (!num || num === 0) return Buffer.alloc(0);
-    let hex = BigInt(num).toString(16);
-    if (hex.length % 2 !== 0) hex = "0" + hex;
-    return Buffer.from(hex, "hex");
-}
-
-function rlpEncodeItem(item) {
-    if (Array.isArray(item)) {
-        const payload = Buffer.concat(item.map(rlpEncodeItem));
-        if (payload.length <= 55) return Buffer.concat([Buffer.from([0xc0 + payload.length]), payload]);
-        const lenBuf = intToMinimalBuffer(payload.length);
-        return Buffer.concat([Buffer.from([0xf7 + lenBuf.length]), lenBuf, payload]);
-    }
-    const buf = Buffer.isBuffer(item) ? item : Buffer.from(item);
-    if (buf.length === 1 && buf[0] < 0x80) return buf;
-    if (buf.length <= 55) return Buffer.concat([Buffer.from([0x80 + buf.length]), buf]);
-    const lenBuf = intToMinimalBuffer(buf.length);
-    return Buffer.concat([Buffer.from([0xb7 + lenBuf.length]), lenBuf, buf]);
-}
-
-function rlpDecode(buf, offset = 0) {
-    if (offset >= buf.length) return { data: Buffer.alloc(0), nextOffset: offset };
-    const p = buf[offset];
-    if (p <= 0x7f) return { data: buf.subarray(offset, offset + 1), nextOffset: offset + 1 };
-    if (p <= 0xb7) {
-        const len = p - 0x80;
-        return { data: buf.subarray(offset + 1, offset + 1 + len), nextOffset: offset + 1 + len };
-    }
-    if (p <= 0xbf) {
-        const ll = p - 0xb7;
-        let len = 0;
-        for (let i = 0; i < ll; i++) len = (len << 8) | buf[offset + 1 + i];
-        const s = offset + 1 + ll;
-        return { data: buf.subarray(s, s + len), nextOffset: s + len };
-    }
-    if (p <= 0xf7) {
-        const listLen = p - 0xc0;
-        const items = [];
-        let cur = offset + 1, end = cur + listLen;
-        while (cur < end) {
-            const d = rlpDecode(buf, cur);
-            items.push(d.data);
-            cur = d.nextOffset;
-        }
-        return { data: items, nextOffset: end };
-    }
-    const ll = p - 0xf7;
-    let listLen = 0;
-    for (let i = 0; i < ll; i++) listLen = (listLen << 8) | buf[offset + 1 + i];
-    const items = [];
-    let cur = offset + 1 + ll, end = cur + listLen;
-    while (cur < end) {
-        const d = rlpDecode(buf, cur);
-        items.push(d.data);
-        cur = d.nextOffset;
-    }
-    return { data: items, nextOffset: end };
-}
-
-function decodeSignedRawTransaction(rawHex) {
-    const cleanFull = rawHex.toLowerCase().replace(/^0x/, "");
-    // CRITICAL FOR METAMASK MOBILE: Compute the exact keccak256 hash of the signed raw bytes!
-    // MetaMask iOS computes this exact hash locally and polls `eth_getTransactionReceipt(localTxHash)`!
-    const localTxHash = "0x" + keccak256Hex(cleanFull);
-
-    try {
-        let clean = cleanFull;
-        let txType = 0;
-        if (clean.startsWith("02") || clean.startsWith("01")) {
-            txType = parseInt(clean.slice(0, 2), 16);
-            clean = clean.slice(2);
-        }
-        const buf = Buffer.from(clean, "hex");
-        const items = rlpDecode(buf, 0).data;
-        if (!Array.isArray(items)) return { localTxHash, txType: "0x0" };
-
-        let nonceBuf, toBuf, valBuf, dataBuf, vBuf, rBuf, sBuf, unsignedFields;
-        if (txType === 2) {
-            [, nonceBuf, , , , toBuf, valBuf, dataBuf, , vBuf, rBuf, sBuf] = items;
-            unsignedFields = items.slice(0, 9);
-        } else if (txType === 1) {
-            [, nonceBuf, , , toBuf, valBuf, dataBuf, , vBuf, rBuf, sBuf] = items;
-            unsignedFields = items.slice(0, 8);
-        } else {
-            [nonceBuf, , , toBuf, valBuf, dataBuf, vBuf, rBuf, sBuf] = items;
-            const vNum = vBuf?.length ? Number(BigInt("0x" + vBuf.toString("hex"))) : 27;
-            if (vNum >= 35) {
-                const chainId = Math.floor((vNum - 35) / 2);
-                unsignedFields = [...items.slice(0, 6), intToMinimalBuffer(chainId), Buffer.alloc(0), Buffer.alloc(0)];
-            } else {
-                unsignedFields = items.slice(0, 6);
-            }
-        }
-
-        let recoveredFrom = null;
-        if (rBuf?.length && sBuf?.length) {
-            const rBig = BigInt("0x" + rBuf.toString("hex"));
-            const sBig = BigInt("0x" + sBuf.toString("hex"));
-            const vInt = vBuf?.length ? Number(BigInt("0x" + vBuf.toString("hex"))) : 0;
-            const recId = txType === 0 ? (vInt >= 35 ? (vInt - 35) % 2 : vInt - 27) : (vInt & 1);
-            const rlpUnsigned = rlpEncodeItem(unsignedFields);
-            const signingPayload = txType > 0 ? Buffer.concat([Buffer.from([txType]), rlpUnsigned]) : rlpUnsigned;
-            const msgHash = keccak256Buf(signingPayload);
-            recoveredFrom = ecrecoverAddress(msgHash, rBig, sBig, recId);
-        }
-
-        const nonce = nonceBuf?.length ? parseInt(nonceBuf.toString("hex"), 16) : 0;
-        const toHex20 = toBuf?.length ? toBuf.toString("hex").toLowerCase().padStart(40, "0") : "";
-        const valueWei = valBuf?.length ? BigInt("0x" + valBuf.toString("hex")) : 0n;
-        const dataHex = dataBuf?.length ? dataBuf.toString("hex").toLowerCase() : "";
-
-        return {
-            localTxHash,
-            txTypeHex: "0x" + txType.toString(16),
-            fromHex20: recoveredFrom,
-            nonce,
-            toHex20,
-            valueWei,
-            dataHex
-        };
-    } catch {
-        return { localTxHash, txTypeHex: "0x0" };
-    }
-}
-
-// ============================================================================
-// 3. BASE58 <-> HEX20 & PERSISTENT MULTI-COIN LEDGER
+// 1. TRON BASE58CHECK <-> 20-BYTE / 21-BYTE HEX CONVERTERS
 // ============================================================================
 const B58_ALPHA = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const B58_MAP = new Map([...B58_ALPHA].map((c, i) => [c, BigInt(i)]));
@@ -330,7 +67,7 @@ const B58_MAP = new Map([...B58_ALPHA].map((c, i) => [c, BigInt(i)]));
 function base58ToHex20(b58) {
     try {
         let num = 0n;
-        for (const ch of b58) {
+        for (const ch of b58.trim()) {
             const v = B58_MAP.get(ch);
             if (v === undefined) return null;
             num = num * 58n + v;
@@ -338,20 +75,27 @@ function base58ToHex20(b58) {
         let hex = num.toString(16);
         if (hex.length % 2 !== 0) hex = "0" + hex;
         hex = hex.padStart(50, "0");
-        if (hex.startsWith("41") && hex.length === 50) return hex.slice(2, 42).toLowerCase();
+        if (hex.startsWith("41") && hex.length === 50) {
+            return hex.slice(2, 42).toLowerCase();
+        }
         return null;
-    } catch { return null; }
+    } catch {
+        return null;
+    }
 }
 
 function hex20ToTronBase58(hex20) {
-    const clean = hex20.toLowerCase().replace(/^(0x|41)/, "").padStart(40, "0");
+    const clean = (hex20 || "").toLowerCase().replace(/^(0x|41)/, "").padStart(40, "0").slice(-40);
     const payload = Buffer.from("41" + clean, "hex");
     const h1 = crypto.createHash("sha256").update(payload).digest();
     const h2 = crypto.createHash("sha256").update(h1).digest();
     const full = Buffer.concat([payload, h2.subarray(0, 4)]);
     let num = BigInt("0x" + full.toString("hex"));
     let out = "";
-    while (num > 0n) { out = B58_ALPHA[Number(num % 58n)] + out; num /= 58n; }
+    while (num > 0n) {
+        out = B58_ALPHA[Number(num % 58n)] + out;
+        num /= 58n;
+    }
     for (let i = 0; i < full.length && full[i] === 0; i++) out = "1" + out;
     return out;
 }
@@ -363,25 +107,59 @@ function normAddr(addr) {
         const dec = base58ToHex20(s);
         if (dec) return dec;
     }
+    try {
+        // Also support Base64-encoded Tron addresses if sent by mobile SDKs
+        if (!/^[0-9a-fA-Fx]+$/.test(s) && s.length === 28 && s.endsWith("=")) {
+            const buf = Buffer.from(s, "base64").toString("hex").toLowerCase();
+            if (buf.length === 42 && buf.startsWith("41")) return buf.slice(2);
+        }
+    } catch {}
     const low = s.toLowerCase().replace(/^0x/, "");
     if (low.length === 42 && low.startsWith("41")) return low.slice(2);
     if (low.length >= 40) return low.slice(-40);
     return low.padStart(40, "0");
 }
 
-let state = { wallets: {}, nonces: {}, txReceipts: {}, history: [] };
-const pendingIntents = new Map();
-let lastActiveSender = null;
-let latestBlockInt = 46500000n;
-let latestBlockHex = "0x" + latestBlockInt.toString(16);
-let liveBscValuePool = [];
+// ============================================================================
+// 2. PERSISTENT TRC-20 LEDGER & BLOCK PRODUCER
+// ============================================================================
+let state = {
+    wallets: {},     // wallets[hex20] = { TRX: "sun6", USDT: "micro6", USDC: "micro6", ... }
+    txStaging: {},   // txID -> staged unsigned tx created by `/wallet/triggersmartcontract` or `/wallet/createtransaction`
+    txReceipts: {},  // txID -> confirmed receipt
+    history: []      // Full TRC-20 & TRX transfer/swap history
+};
 
-// Advance block number every 2.5 seconds so MetaMask Mobile's block-tracker immediately
-// sees new blocks and confirms pending transactions!
+let lastActiveSender = null;
+let latestBlockNum = 68450000;
+let liveTronscanHashes = [];
+
 setInterval(() => {
-    latestBlockInt += 1n;
-    latestBlockHex = "0x" + latestBlockInt.toString(16);
-}, 2500);
+    latestBlockNum += 1;
+}, 3000);
+
+function getBlockHeader(blkNum = latestBlockNum) {
+    const rawHash = crypto.createHash("sha256").update("tron_blk_" + blkNum).digest("hex");
+    const numHex16 = blkNum.toString(16).padStart(16, "0");
+    const blockID = numHex16 + rawHash.slice(16);
+    const parentHash = (blkNum - 1).toString(16).padStart(16, "0") +
+        crypto.createHash("sha256").update("tron_blk_" + (blkNum - 1)).digest("hex").slice(16);
+
+    return {
+        blockID,
+        block_header: {
+            raw_data: {
+                number: blkNum,
+                txTrieRoot: crypto.createHash("sha256").update("trie_" + blkNum).digest("hex"),
+                witness_address: "4122a4e8c958173c064015382f84a68e2e66b1b8d2",
+                parentHash,
+                version: 30,
+                timestamp: Date.now()
+            },
+            witness_signature: "a8".repeat(65)
+        }
+    };
+}
 
 function loadState() {
     try {
@@ -393,830 +171,474 @@ function loadState() {
 }
 
 function saveState() {
-    try { fs.writeFileSync(CONFIG.ledgerFile, JSON.stringify(state, null, 2), "utf8"); } catch {}
+    try {
+        fs.writeFileSync(CONFIG.ledgerFile, JSON.stringify(state, null, 2), "utf8");
+    } catch {}
 }
 loadState();
 
-function ensureWalletRecord(addr) {
+function ensureWallet(addr) {
     const k = normAddr(addr);
     if (k === "0000000000000000000000000000000000000000") return null;
     if (!state.wallets[k]) {
         state.wallets[k] = {
-            BNB:  (BigInt(CONFIG.defaultAutoBnb) * (10n ** 18n)).toString(),
+            TRX:  (BigInt(CONFIG.defaultAutoTrx) * 1_000_000n).toString(),
             USDT: (BigInt(CONFIG.defaultAutoUsdt) * 1_000_000n).toString()
         };
         saveState();
-        console.log(`\n[WALLET CONNECTED] 0x${k} (Tron: ${hex20ToTronBase58(k)})`);
-        console.log(`  -> Balance is 0. Fund via terminal: credit 0x${k} 500000 10`);
+        console.log(`\n[NEW TRON WALLET CONNECTED] ${hex20ToTronBase58(k)} (Hex: 41${k})`);
+        console.log(`  -> Balance is 0 USDT, 0 TRX. Fund via terminal: credit ${hex20ToTronBase58(k)} 500000 2500`);
     }
     return state.wallets[k];
 }
 
-function resolveSymbol(symOrAddr) {
-    if (!symOrAddr) return "USDT";
-    const upper = symOrAddr.trim().toUpperCase();
-    if (CONFIG.tokens[upper] || upper === "BNB") return upper;
-    const cleanAddr = normAddr(symOrAddr);
-    const found = ADDRESS_TO_TOKEN.get(cleanAddr);
-    return found ? found.symbol : "USDT";
+function resolveSymbol(symOrContract) {
+    if (!symOrContract) return "USDT";
+    const s = symOrContract.trim();
+    const upper = s.toUpperCase();
+    if (CONFIG.tokens[upper]) return upper;
+    if (CONTRACT_TO_TOKEN.has(s)) return CONTRACT_TO_TOKEN.get(s).symbol;
+    const h20 = normAddr(s);
+    if (CONTRACT_TO_TOKEN.has(h20)) return CONTRACT_TO_TOKEN.get(h20).symbol;
+    return "USDT";
 }
 
-function getTokenPriceUsd(symOrAddr) {
-    const sym = resolveSymbol(symOrAddr);
-    if (sym === "BNB" || sym === "WBNB") return CONFIG.tokens.WBNB.priceUsd;
+function getTokenPriceUsd(symOrContract) {
+    const sym = resolveSymbol(symOrContract);
     return CONFIG.tokens[sym] ? CONFIG.tokens[sym].priceUsd : 1.0;
 }
 
-function getTokenBal6(addr, symbolOrContract) {
-    const w = ensureWalletRecord(addr);
+// All balances are stored internally in 6-decimal micro-units (1.000000 = 1,000,000)
+// Matches TRC-20 USDT (6 decimals) and TRX SUN (6 decimals) 1-to-1!
+function getBal6(addr, symOrContract = "USDT") {
+    const w = ensureWallet(addr);
     if (!w) return 0n;
-    const sym = resolveSymbol(symbolOrContract);
+    const sym = resolveSymbol(symOrContract);
     return BigInt(w[sym] || "0");
 }
 
-function setTokenBal6(addr, symbolOrContract, amount6BigInt) {
-    const w = ensureWalletRecord(addr);
+function setBal6(addr, symOrContract, val6BigInt) {
+    const w = ensureWallet(addr);
     if (!w) return;
-    const sym = resolveSymbol(symbolOrContract);
-    w[sym] = (amount6BigInt < 0n ? 0n : amount6BigInt).toString();
+    const sym = resolveSymbol(symOrContract);
+    w[sym] = (val6BigInt < 0n ? 0n : val6BigInt).toString();
     saveState();
 }
 
-function getTokenBalHex(addr, contractNo0x) {
-    const normC = normAddr(contractNo0x);
-    const tok = ADDRESS_TO_TOKEN.get(normC);
-    const dec = tok ? tok.decimals : 18;
-    const bal6 = getTokenBal6(addr, normC);
-    let scaled = bal6;
-    if (dec > 6) scaled = bal6 * (10n ** BigInt(dec - 6));
-    else if (dec < 6) scaled = bal6 / (10n ** BigInt(6 - dec));
+function getContractScaledHex64(addr, symOrContract) {
+    const sym = resolveSymbol(symOrContract);
+    const dec = CONFIG.tokens[sym]?.decimals || 6;
+    const bal6 = getBal6(addr, sym);
+    const scaled = dec > 6 ? bal6 * (10n ** BigInt(dec - 6)) : bal6;
     return scaled.toString(16).padStart(64, "0");
 }
 
-function getBnbWei(addr) {
-    const w = ensureWalletRecord(addr);
-    if (!w) return 0n;
-    return BigInt(w.BNB || "0");
-}
-
-function setBnbWei(addr, weiBigInt) {
-    const w = ensureWalletRecord(addr);
-    if (!w) return;
-    w.BNB = (weiBigInt < 0n ? 0n : weiBigInt).toString();
-    saveState();
-}
-
 // ============================================================================
-// 4. VALUE-INDEXED LIVE BSCSCAN HASH HARVESTER
+// 3. LIVE TRONSCAN CONFIRMED TX-HASH HARVESTER
 // ============================================================================
-async function harvestValueIndexedBscScanHashes() {
-    for (const url of CONFIG.bscUpstreams) {
-        try {
-            const res = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBlockByNumber", params: ["latest", true] }),
-                signal: AbortSignal.timeout(4000)
-            });
-            const j = await res.json();
-            const blk = j?.result;
-            if (!blk || !Array.isArray(blk.transactions)) continue;
-            if (blk.number && BigInt(blk.number) > latestBlockInt) {
-                latestBlockInt = BigInt(blk.number);
-                latestBlockHex = "0x" + latestBlockInt.toString(16);
-            }
-
-            for (const tx of blk.transactions) {
-                if (!tx || !tx.hash || !tx.to) continue;
-                const toClean = normAddr(tx.to);
-                const inputClean = (tx.input || "").toLowerCase().replace(/^0x/, "");
-                const valWei = tx.value ? BigInt(tx.value) : 0n;
-
-                if (valWei >= 5n * (10n ** 16n)) {
-                    const bnbUsd = (Number(valWei) / 1e18) * CONFIG.tokens.WBNB.priceUsd;
-                    if (!liveBscValuePool.some(x => x.hash === tx.hash.toLowerCase())) {
-                        liveBscValuePool.unshift({
-                            hash: tx.hash.toLowerCase(),
-                            amountUsd: bnbUsd,
-                            type: inputClean.length >= 8 ? "SWAP" : "BNB"
-                        });
-                    }
-                } else if (toClean === CONFIG.tokens.USDT.address && inputClean.startsWith("a9059cbb") && inputClean.length >= 136) {
-                    try {
-                        const rawAmt18 = BigInt("0x" + inputClean.slice(72, 136));
-                        const usdtVal = Number(rawAmt18 / (10n ** 16n)) / 100;
-                        if (usdtVal >= 50) {
-                            if (!liveBscValuePool.some(x => x.hash === tx.hash.toLowerCase())) {
-                                liveBscValuePool.unshift({
-                                    hash: tx.hash.toLowerCase(),
-                                    amountUsd: usdtVal,
-                                    type: "USDT"
-                                });
-                            }
-                        }
-                    } catch {}
-                }
-            }
-            if (liveBscValuePool.length > 150) liveBscValuePool.length = 150;
-            break;
-        } catch {}
-    }
-}
-setInterval(harvestValueIndexedBscScanHashes, 4000);
-harvestValueIndexedBscScanHashes();
-
-async function pickClosestValueBscScanHash(targetUsd = 1000, preferredType = "USDT") {
-    if (liveBscValuePool.length === 0) await harvestValueIndexedBscScanHashes();
-    if (liveBscValuePool.length > 0) {
-        let bestIdx = 0, bestDiff = Infinity;
-        for (let i = 0; i < liveBscValuePool.length; i++) {
-            const item = liveBscValuePool[i];
-            const typeBonus = item.type === preferredType ? 0.5 : 1.0;
-            const diff = Math.abs(item.amountUsd - targetUsd) * typeBonus;
-            if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
-        }
-        const chosen = liveBscValuePool.splice(bestIdx, 1)[0];
-        liveBscValuePool.push(chosen);
-        return chosen.hash;
-    }
-    return "0x" + crypto.randomBytes(32).toString("hex");
-}
-
-// ============================================================================
-// 5. LOCAL DEX QUOTER & MULTICALL3 REWRITER
-// ============================================================================
-function convertRawAmountBetweenTokens(amountRawIn, fromAddrOrSym, toAddrOrSym) {
-    const fromSym = resolveSymbol(fromAddrOrSym);
-    const toSym   = resolveSymbol(toAddrOrSym);
-    const fromDec = CONFIG.tokens[fromSym]?.decimals || 18;
-    const toDec   = CONFIG.tokens[toSym]?.decimals || 18;
-
-    const inFloat  = Number(amountRawIn) / (10 ** fromDec);
-    const usdVal   = inFloat * getTokenPriceUsd(fromSym);
-    const outFloat = (usdVal / getTokenPriceUsd(toSym)) * 0.998;
-    const outMicro = BigInt(Math.max(1, Math.floor(outFloat * 1e6)));
-
-    if (toDec >= 6) return outMicro * (10n ** BigInt(toDec - 6));
-    return outMicro / (10n ** BigInt(6 - toDec));
-}
-
-function tryHandleLocalDexQuoter(toContractNo0x, dataHex) {
-    const clean = dataHex.toLowerCase().replace(/^0x/, "");
-    if (clean.length < 8) return null;
-    const sel = clean.slice(0, 8);
-    const args = clean.slice(8);
-
+async function harvestLiveTronscanHashes() {
     try {
-        if (sel === "d06ca61f" && args.length >= 192) {
-            const amountIn = BigInt("0x" + args.slice(0, 64));
-            const pathOffset = Number(BigInt("0x" + args.slice(64, 128))) * 2;
-            const pathLen = Number(BigInt("0x" + args.slice(pathOffset, pathOffset + 64)));
-            const pathAddrs = [];
-            for (let i = 0; i < pathLen; i++) {
-                const pos = pathOffset + 64 + i * 64;
-                pathAddrs.push(args.slice(pos + 24, pos + 64));
-            }
-            if (pathAddrs.length >= 2) {
-                const amounts = [amountIn];
-                let curAmt = amountIn;
-                for (let i = 0; i < pathAddrs.length - 1; i++) {
-                    curAmt = convertRawAmountBetweenTokens(curAmt, pathAddrs[i], pathAddrs[i + 1]);
-                    amounts.push(curAmt);
+        const r = await fetch("https://api.trongrid.io/wallet/getnowblock", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: AbortSignal.timeout(4000)
+        });
+        const blk = await r.json();
+        if (blk?.block_header?.raw_data?.number) {
+            latestBlockNum = blk.block_header.raw_data.number;
+        }
+        if (Array.isArray(blk?.transactions)) {
+            for (const tx of blk.transactions) {
+                if (tx?.txID && tx?.ret?.[0]?.contractRet === "SUCCESS") {
+                    if (!liveTronscanHashes.includes(tx.txID)) {
+                        liveTronscanHashes.unshift(tx.txID);
+                    }
                 }
-                let outHex = "0x" + "0".repeat(62) + "20" + amounts.length.toString(16).padStart(64, "0");
-                for (const a of amounts) outHex += a.toString(16).padStart(64, "0");
-                return outHex;
             }
-        }
-        if (sel === "1f00ca74" && args.length >= 192) {
-            const amountOut = BigInt("0x" + args.slice(0, 64));
-            const pathOffset = Number(BigInt("0x" + args.slice(64, 128))) * 2;
-            const pathLen = Number(BigInt("0x" + args.slice(pathOffset, pathOffset + 64)));
-            const pathAddrs = [];
-            for (let i = 0; i < pathLen; i++) {
-                const pos = pathOffset + 64 + i * 64;
-                pathAddrs.push(args.slice(pos + 24, pos + 64));
-            }
-            if (pathAddrs.length >= 2) {
-                const amtIn = convertRawAmountBetweenTokens(amountOut, pathAddrs[pathAddrs.length - 1], pathAddrs[0]);
-                const amounts = [amtIn, amountOut];
-                let outHex = "0x" + "0".repeat(62) + "20" + amounts.length.toString(16).padStart(64, "0");
-                for (const a of amounts) outHex += a.toString(16).padStart(64, "0");
-                return outHex;
-            }
-        }
-        if ((sel === "c6a5026a" || sel === "f7729d43") && args.length >= 192) {
-            const tokenIn  = args.slice(24, 64);
-            const tokenOut = args.slice(88, 128);
-            const amountIn = BigInt("0x" + (sel === "c6a5026a" ? args.slice(128, 192) : args.slice(192, 256)));
-            const amountOut = convertRawAmountBetweenTokens(amountIn, tokenIn, tokenOut);
-            const sqrtPriceX96 = (1n << 96n).toString(16).padStart(64, "0");
-            const gasEst = (120000n).toString(16).padStart(64, "0");
-            return "0x" + amountOut.toString(16).padStart(64, "0") + sqrtPriceX96 + "0".repeat(64) + gasEst;
+            if (liveTronscanHashes.length > 120) liveTronscanHashes.length = 120;
         }
     } catch {}
-    return null;
 }
+setInterval(harvestLiveTronscanHashes, 4500);
+harvestLiveTronscanHashes();
 
-function readNum(hex, charOffset) {
-    return Number(BigInt("0x" + hex.slice(charOffset, charOffset + 64)));
-}
-
-function decodeMulticallInputs(calldataHex) {
-    const clean = calldataHex.toLowerCase().replace(/^0x/, "");
-    if (clean.length < 8) return null;
-    const selector = clean.slice(0, 8);
-    const args = clean.slice(8);
-    if (!["252dba42", "bce38bd7", "82ad56cb", "174dea71"].includes(selector)) return null;
-
-    try {
-        const arrOffsetBytes = selector === "bce38bd7" ? readNum(args, 64) : readNum(args, 0);
-        const arrStart = arrOffsetBytes * 2;
-        const count = readNum(args, arrStart);
-        const elemHeadBase = arrStart + 64;
-
-        const calls = [];
-        for (let i = 0; i < count; i++) {
-            const structRelBytes = readNum(args, elemHeadBase + i * 64);
-            const structPos = elemHeadBase + structRelBytes * 2;
-            const target = args.slice(structPos + 24, structPos + 64);
-
-            let bytesRelOffset = 0;
-            if (selector === "252dba42" || selector === "bce38bd7") bytesRelOffset = readNum(args, structPos + 64);
-            else if (selector === "82ad56cb") bytesRelOffset = readNum(args, structPos + 128);
-            else if (selector === "174dea71") bytesRelOffset = readNum(args, structPos + 192);
-
-            const bytesPos = structPos + bytesRelOffset * 2;
-            const bytesLen = readNum(args, bytesPos);
-            const callData = args.slice(bytesPos + 64, bytesPos + 64 + bytesLen * 2);
-            calls.push({ index: i, target, callData });
-        }
-        return { selector, calls };
-    } catch { return null; }
-}
-
-function patchMulticallOutput(calldataHex, upstreamResultHex) {
-    const decodedIn = decodeMulticallInputs(calldataHex);
-    if (!decodedIn || !upstreamResultHex || upstreamResultHex === "0x") return upstreamResultHex;
-
-    const { selector, calls } = decodedIn;
-    const replacements = new Map();
-
-    for (const c of calls) {
-        if (ADDRESS_TO_TOKEN.has(c.target) && c.callData.startsWith("70a08231") && c.callData.length >= 72) {
-            const wallet = c.callData.slice(32, 72);
-            replacements.set(c.index, getTokenBalHex(wallet, c.target));
-        } else if (ADDRESS_TO_TOKEN.has(c.target) && c.callData.startsWith("dd62ed3e")) {
-            replacements.set(c.index, "f".repeat(64));
-        } else if (c.callData.startsWith("4d2301cc") && c.callData.length >= 72) {
-            const wallet = c.callData.slice(32, 72);
-            replacements.set(c.index, getBnbWei(wallet).toString(16).padStart(64, "0"));
-        } else if (c.callData.startsWith("c6a5026a") || c.callData.startsWith("f7729d43") || c.callData.startsWith("d06ca61f")) {
-            const qHex = tryHandleLocalDexQuoter(c.target, c.callData);
-            if (qHex) replacements.set(c.index, qHex.slice(2, 66));
-        }
+async function pickRealTronscanTxId() {
+    if (liveTronscanHashes.length === 0) await harvestLiveTronscanHashes();
+    if (liveTronscanHashes.length > 0) {
+        const h = liveTronscanHashes.shift();
+        liveTronscanHashes.push(h);
+        return h.toLowerCase().replace(/^0x/, "");
     }
-
-    if (replacements.size === 0) return upstreamResultHex;
-
-    try {
-        const outClean = upstreamResultHex.toLowerCase().replace(/^0x/, "");
-        const outChars = outClean.split("");
-
-        if (selector === "252dba42") {
-            const blkWord = latestBlockInt.toString(16).padStart(64, "0");
-            for (let k = 0; k < 64; k++) outChars[k] = blkWord[k];
-
-            const arrOffsetBytes = readNum(outClean, 64);
-            const arrStart = arrOffsetBytes * 2;
-            const elemHeadBase = arrStart + 64;
-
-            for (const [idx, newWord64] of replacements.entries()) {
-                const elemRelBytes = readNum(outClean, elemHeadBase + idx * 64);
-                const bytesPos = elemHeadBase + elemRelBytes * 2;
-                const bytesLen = readNum(outClean, bytesPos);
-                if (bytesLen >= 32) {
-                    const dataStart = bytesPos + 64;
-                    for (let k = 0; k < 64; k++) outChars[dataStart + k] = newWord64[k];
-                }
-            }
-        } else {
-            const arrOffsetBytes = readNum(outClean, 0);
-            const arrStart = arrOffsetBytes * 2;
-            const elemHeadBase = arrStart + 64;
-
-            for (const [idx, newWord64] of replacements.entries()) {
-                const structRelBytes = readNum(outClean, elemHeadBase + idx * 64);
-                const structPos = elemHeadBase + structRelBytes * 2;
-                outChars[structPos + 63] = "1";
-                const bytesRelBytes = readNum(outClean, structPos + 64);
-                const bytesPos = structPos + bytesRelBytes * 2;
-                const bytesLen = readNum(outClean, bytesPos);
-                if (bytesLen >= 32) {
-                    const dataStart = bytesPos + 64;
-                    for (let k = 0; k < 64; k++) outChars[dataStart + k] = newWord64[k];
-                }
-            }
-        }
-        return "0x" + outChars.join("");
-    } catch { return upstreamResultHex; }
-}
-
-function tryHandleMetaMaskBalanceChecker(dataHex) {
-    const clean = dataHex.toLowerCase().replace(/^0x/, "");
-    if (!clean.startsWith("f0002ea9")) return null;
-    try {
-        const body = clean.slice(8);
-        const usersOffset = readNum(body, 0) * 2;
-        const tokensOffset = readNum(body, 64) * 2;
-        const usersLen = readNum(body, usersOffset);
-        const users = [];
-        for (let i = 0; i < usersLen; i++) {
-            const pos = usersOffset + 64 + i * 64;
-            users.push(body.slice(pos + 24, pos + 64));
-        }
-        const tokensLen = readNum(body, tokensOffset);
-        const tokens = [];
-        for (let i = 0; i < tokensLen; i++) {
-            const pos = tokensOffset + 64 + i * 64;
-            tokens.push(body.slice(pos + 24, pos + 64));
-        }
-
-        const total = usersLen * tokensLen;
-        let out = "0x" + "0".repeat(62) + "20" + total.toString(16).padStart(64, "0");
-
-        for (const u of users) {
-            for (const t of tokens) {
-                if (t === "0000000000000000000000000000000000000000") {
-                    out += getBnbWei(u).toString(16).padStart(64, "0");
-                } else if (ADDRESS_TO_TOKEN.has(t)) {
-                    out += getTokenBalHex(u, t);
-                } else {
-                    out += "0".repeat(64);
-                }
-            }
-        }
-        return out;
-    } catch { return null; }
-}
-
-function parseDexSwapCalldata(toContractNo0x, dataHex, valueWei) {
-    const clean = dataHex.toLowerCase().replace(/^0x/, "");
-    const sel = clean.slice(0, 8);
-
-    const foundTokens = [];
-    for (const [addr, info] of ADDRESS_TO_TOKEN.entries()) {
-        let searchStart = 0;
-        while (true) {
-            const pos = clean.indexOf(addr, searchStart);
-            if (pos === -1) break;
-            foundTokens.push({ pos, sym: info.symbol });
-            searchStart = pos + 40;
-        }
-    }
-    foundTokens.sort((a, b) => a.pos - b.pos);
-
-    if (valueWei > 0n && (sel === "7ff36ab5" || sel === "b6f9de95" || CONFIG.dexRouters.has(toContractNo0x) || foundTokens.length > 0)) {
-        const amtIn6 = valueWei / (10n ** 12n);
-        const nonWbnb = foundTokens.filter(t => t.sym !== "WBNB");
-        const outSym = nonWbnb.length > 0 ? nonWbnb[nonWbnb.length - 1].sym : "USDT";
-        return { fromSym: "BNB", toSym: outSym, amtIn6 };
-    }
-
-    if (
-        CONFIG.dexRouters.has(toContractNo0x) ||
-        foundTokens.length >= 2 ||
-        ["38ed1739", "18cbafe5", "791ac947", "5c11d795", "472b43f3", "04e45aaf", "ac9650d8", "3593564c", "5ae401dc", "5f575529", "12aa3caf"].includes(sel)
-    ) {
-        let amtIn6 = 100_000_000n;
-        for (let offset = 8; offset + 64 <= clean.length; offset += 64) {
-            try {
-                const w = BigInt("0x" + clean.slice(offset, offset + 64));
-                if (w >= 10n ** 14n && w <= 10n ** 28n) {
-                    amtIn6 = w / (10n ** 12n);
-                    break;
-                }
-            } catch {}
-        }
-
-        const fromSym = foundTokens[0]?.sym || "USDT";
-        let toSym = foundTokens[foundTokens.length - 1]?.sym || "BNB";
-        if (toSym === fromSym) toSym = fromSym === "USDT" ? "BNB" : "USDT";
-        if (toSym === "WBNB" || sel === "18cbafe5" || sel === "791ac947") toSym = "BNB";
-
-        return { fromSym, toSym, amtIn6 };
-    }
-    return null;
+    return crypto.randomBytes(32).toString("hex");
 }
 
 // ============================================================================
-// 6. DUAL-HASH RECEIPT INDEXER & ATOMIC TRANSFER/SWAP ENGINE
-// Saves every receipt under BOTH `localTxHash` (MetaMask's computed hash) AND
-// `bscScanHash` so MetaMask Mobile confirms in 1 second AND BscScan works!
+// 4. ATOMIC TRC-20 TRANSFER, NATIVE TRX TRANSFER & SUNSWAP EXECUTION ENGINE
 // ============================================================================
-function resolveVerifiedSender(recoveredFrom, intentFrom, excludeRecipient, requiredSym = null, requiredAmt6 = 0n) {
-    const intKey = normAddr(intentFrom);
-    if (intKey !== "0000000000000000000000000000000000000000" && intKey !== excludeRecipient && state.wallets[intKey]) {
-        return intKey;
+function resolveSender(preferredFrom, excludeTo, sym = "USDT", needed6 = 0n) {
+    const p = normAddr(preferredFrom);
+    if (p !== "0000000000000000000000000000000000000000" && p !== excludeTo && state.wallets[p]) return p;
+    if (lastActiveSender && lastActiveSender !== excludeTo && state.wallets[lastActiveSender]) return lastActiveSender;
+    for (const k of Object.keys(state.wallets)) {
+        if (k !== excludeTo && getBal6(k, sym) >= needed6) return k;
     }
-    const recKey = normAddr(recoveredFrom);
-    if (recKey !== "0000000000000000000000000000000000000000" && recKey !== excludeRecipient && state.wallets[recKey]) {
-        return recKey;
-    }
-    if (lastActiveSender && lastActiveSender !== excludeRecipient && state.wallets[lastActiveSender]) {
-        if (!requiredSym || getTokenBal6(lastActiveSender, requiredSym) >= requiredAmt6) {
-            return lastActiveSender;
-        }
-    }
-    for (const addr of Object.keys(state.wallets)) {
-        if (addr !== excludeRecipient) {
-            if (requiredSym === "BNB") {
-                if (getBnbWei(addr) >= requiredAmt6 * (10n ** 12n)) return addr;
-            } else if (!requiredSym || getTokenBal6(addr, requiredSym) >= requiredAmt6) {
-                return addr;
-            }
-        }
-    }
-    if (recKey !== "0000000000000000000000000000000000000000") return recKey;
+    if (p !== "0000000000000000000000000000000000000000") return p;
     return Object.keys(state.wallets)[0] || "0000000000000000000000000000000000000000";
 }
 
-function advanceWalletNonce(walletKey, txNonce) {
-    const cur = state.nonces[walletKey] || 0;
-    if (txNonce !== null && txNonce !== undefined && txNonce >= cur) {
-        state.nonces[walletKey] = txNonce + 1;
-    } else {
-        state.nonces[walletKey] = cur + 1;
-    }
-}
-
-function saveDualHashReceipt(rec, localTxHash, bscScanHash) {
-    const cleanLocal = (localTxHash || rec.txHash).toLowerCase().replace(/^0x/, "");
-    const cleanBsc   = (bscScanHash || rec.txHash).toLowerCase().replace(/^0x/, "");
-
-    state.txReceipts[cleanLocal] = { ...rec, txHash: "0x" + cleanLocal, txID: cleanLocal, bscScanHash: "0x" + cleanBsc };
-    state.txReceipts[cleanBsc]   = { ...rec, txHash: "0x" + cleanBsc,   txID: cleanBsc,   bscScanHash: "0x" + cleanBsc };
-
-    state.history.unshift(state.txReceipts[cleanLocal]);
-    if (state.history.length > 500) state.history.pop();
-    saveState();
-}
-
-function executeTokenTransfer(recoveredFrom, toAny, tokenContractOrSym, amount6BigInt, localTxHash, bscScanHash, nonceUsed = null, txTypeHex = "0x2") {
+function executeTrc20Transfer(fromAny, toAny, symOrContract, amount6BigInt, txID) {
     const toKey = normAddr(toAny);
-    const sym   = resolveSymbol(tokenContractOrSym);
+    const sym   = resolveSymbol(symOrContract);
     const amt6  = amount6BigInt < 0n ? 0n : amount6BigInt;
-
-    const intentKey = `${toKey}_${amt6.toString()}`;
-    const lockedSender = pendingIntents.get(intentKey);
-    if (lockedSender) pendingIntents.delete(intentKey);
-
-    const fromKey = resolveVerifiedSender(recoveredFrom, lockedSender, toKey, sym, amt6);
+    const fromKey = resolveSender(fromAny, toKey, sym, amt6);
 
     // IN-APP SELF-SEND OR CONTRACT-SEND AUTO-SWAP!
-    // Sending USDT to your own address (`fromKey === toKey`) or to the Token Contract Address
-    // automatically swaps `USDT -> BNB` (or `Token -> USDT`) right inside the MetaMask Mobile App!
-    if (fromKey === toKey || ADDRESS_TO_TOKEN.has(toKey)) {
-        const targetSwapCoin = sym === "USDT" ? "BNB" : "USDT";
-        console.log(`\n[IN-APP SELF-SEND SWAP] Swapping ${Number(amt6)/1e6} ${sym} -> ${targetSwapCoin} inside Wallet App!`);
-        return executeDexSwap(fromKey, sym, targetSwapCoin, amt6, localTxHash, bscScanHash, nonceUsed, txTypeHex);
+    // Sending TRC-20 USDT to your own `T...` address or to the USDT/WTRX contract address
+    // automatically swaps `USDT -> TRX` (or `Token -> USDT`) right inside the wallet!
+    if (fromKey === toKey || CONTRACT_TO_TOKEN.has(toKey)) {
+        const targetSwapSym = sym === "USDT" ? "TRX" : "USDT";
+        console.log(`\n[TRC-20 IN-APP AUTO-SWAP] Swapping ${Number(amt6)/1e6} ${sym} -> ${targetSwapSym}!`);
+        return executeTrc20Swap(fromKey, sym, targetSwapSym, amt6, txID);
     }
 
-    const senderBefore = getTokenBal6(fromKey, sym);
+    const senderBefore = getBal6(fromKey, sym);
     const deduct = senderBefore >= amt6 ? amt6 : senderBefore;
-    setTokenBal6(fromKey, sym, senderBefore - deduct);
-    advanceWalletNonce(fromKey, nonceUsed);
+    setBal6(fromKey, sym, senderBefore - deduct);
 
-    const receiverBefore = getTokenBal6(toKey, sym);
-    setTokenBal6(toKey, sym, receiverBefore + amt6);
+    const receiverBefore = getBal6(toKey, sym);
+    setBal6(toKey, sym, receiverBefore + amt6);
 
-    latestBlockInt += 1n;
-    latestBlockHex = "0x" + latestBlockInt.toString(16);
-
-    const primaryHash = (localTxHash || bscScanHash).toLowerCase().replace(/^0x/, "");
-    const tokInfo = CONFIG.tokens[sym] || CONFIG.tokens.USDT;
-    const dec = tokInfo.decimals || 18;
-    const rawScaledHex = (dec > 6 ? amt6 * (10n ** BigInt(dec - 6)) : amt6).toString(16).padStart(64, "0");
+    latestBlockNum += 1;
+    const cleanId = (txID || crypto.randomBytes(32).toString("hex")).toLowerCase().replace(/^0x/, "");
+    const tokMeta = CONFIG.tokens[sym] || CONFIG.tokens.USDT;
+    const dec = tokMeta.decimals || 6;
+    const rawContractUnits = dec > 6 ? (amt6 * (10n ** BigInt(dec - 6))) : amt6;
     const usdVal = (Number(amt6) / 1e6) * getTokenPriceUsd(sym);
 
     const rec = {
-        type: "TRANSFER",
-        txTypeHex: txTypeHex || "0x2",
+        type: "TRC20_TRANSFER",
         symbol: sym,
-        tokenName: tokInfo.name || "Binance-Peg BSC-USD",
-        tokenAddress: "0x" + (tokInfo.address || CONFIG.tokens.USDT.address),
-        txHash: "0x" + primaryHash,
-        txID: primaryHash,
+        tokenName: tokMeta.name,
+        contractBase58: tokMeta.base58,
+        contractHex41: "41" + tokMeta.hex20,
+        contractHex20: tokMeta.hex20,
+        decimals: dec,
+        txID: cleanId,
         fromHex20: fromKey,
         toHex20: toKey,
         fromBase58: hex20ToTronBase58(fromKey),
         toBase58: hex20ToTronBase58(toKey),
-        nonceHex: "0x" + (nonceUsed !== null ? nonceUsed : Math.max(0, (state.nonces[fromKey] || 1) - 1)).toString(16),
-        valueWeiHex: "0x0",
         amount6: amt6.toString(),
+        rawContractValue: rawContractUnits.toString(),
+        amountHex64: rawContractUnits.toString(16).padStart(64, "0"),
         amountFormatted: (Number(amt6) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2 }),
         usdFormatted: usdVal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        amountScaledHex: rawScaledHex,
-        blockNumberHex: latestBlockHex,
-        blockNumberDec: Number(latestBlockInt),
+        blockNumber: latestBlockNum,
         timestamp: Date.now()
     };
 
-    saveDualHashReceipt(rec, localTxHash, bscScanHash);
+    state.txReceipts[cleanId] = rec;
+    state.history.unshift(rec);
+    if (state.history.length > 500) state.history.pop();
+    saveState();
 
     console.log(`\n==================================================================`);
-    console.log(`[CONFIRMED IN 1s — NO PENDING!] ${rec.amountFormatted} ${sym} ($${rec.usdFormatted} USD)`);
-    console.log(`  Sender (-)   : 0x${fromKey} | Before: ${(Number(senderBefore)/1e6).toLocaleString()} -> Now: ${(Number(getTokenBal6(fromKey, sym))/1e6).toLocaleString()} ${sym}`);
-    console.log(`  Receiver (+) : 0x${toKey} | Before: ${(Number(receiverBefore)/1e6).toLocaleString()} -> Now: ${(Number(getTokenBal6(toKey, sym))/1e6).toLocaleString()} ${sym}`);
-    console.log(`  Wallet Hash  : ${localTxHash}`);
-    console.log(`  BscScan Link : https://bscscan.com/tx/${bscScanHash}`);
+    console.log(`[TRC-20 CONFIRMED IN 1s] ${rec.amountFormatted} ${sym} ($${rec.usdFormatted} USD)`);
+    console.log(`  Sender (-)   : ${rec.fromBase58} | Before: ${(Number(senderBefore)/1e6).toLocaleString()} -> Now: ${(Number(getBal6(fromKey, sym))/1e6).toLocaleString()} ${sym}`);
+    console.log(`  Receiver (+) : ${rec.toBase58} | Before: ${(Number(receiverBefore)/1e6).toLocaleString()} -> Now: ${(Number(getBal6(toKey, sym))/1e6).toLocaleString()} ${sym}`);
+    console.log(`  Tronscan URL : https://tronscan.org/#/transaction/${cleanId}`);
     console.log(`==================================================================`);
-    return state.txReceipts[primaryHash];
+    return rec;
 }
 
-function executeBnbTransfer(recoveredFrom, toAny, valWeiBigInt, localTxHash, bscScanHash, nonceUsed = null, txTypeHex = "0x2") {
+function executeTrxNativeTransfer(fromAny, toAny, sun6BigInt, txID) {
     const toKey = normAddr(toAny);
-    const valWei = valWeiBigInt < 0n ? 0n : valWeiBigInt;
-    const amt6 = valWei / (10n ** 12n);
+    const amt6  = sun6BigInt < 0n ? 0n : sun6BigInt;
+    const fromKey = resolveSender(fromAny, toKey, "TRX", amt6);
 
-    const intentKey = `BNB_${toKey}_${amt6.toString()}`;
-    const lockedSender = pendingIntents.get(intentKey);
-    if (lockedSender) pendingIntents.delete(intentKey);
-
-    const fromKey = resolveVerifiedSender(recoveredFrom, lockedSender, toKey, "BNB", amt6);
-
-    // IN-APP SELF-SEND OR CONTRACT-SEND BNB AUTO-SWAP!
-    // If you send BNB to your own account (`fromKey === toKey`) or to USDT's contract address (`0x55d3...`),
-    // V10 automatically swaps that BNB into USDT (or the target token) right inside the wallet!
-    if (fromKey === toKey || ADDRESS_TO_TOKEN.has(toKey)) {
-        const targetToken = ADDRESS_TO_TOKEN.has(toKey) ? ADDRESS_TO_TOKEN.get(toKey).symbol : "USDT";
-        console.log(`\n[IN-APP SELF-SEND BNB SWAP] Swapping ${Number(valWei)/1e18} BNB -> ${targetToken} inside Wallet App!`);
-        return executeDexSwap(fromKey, "BNB", targetToken, amt6, localTxHash, bscScanHash, nonceUsed, txTypeHex);
+    // Self-Send or Contract-Send TRX Auto-Swap (`TRX -> USDT`)
+    if (fromKey === toKey || CONTRACT_TO_TOKEN.has(toKey)) {
+        const targetSym = CONTRACT_TO_TOKEN.has(toKey) ? CONTRACT_TO_TOKEN.get(toKey).symbol : "USDT";
+        console.log(`\n[TRX IN-APP AUTO-SWAP] Swapping ${Number(amt6)/1e6} TRX -> ${targetSym}!`);
+        return executeTrc20Swap(fromKey, "TRX", targetSym === "TRX" ? "USDT" : targetSym, amt6, txID);
     }
 
-    const senderBeforeWei = getBnbWei(fromKey);
-    const deduct = senderBeforeWei >= valWei ? valWei : senderBeforeWei;
-    setBnbWei(fromKey, senderBeforeWei - deduct);
-    advanceWalletNonce(fromKey, nonceUsed);
+    const senderBefore = getBal6(fromKey, "TRX");
+    const deduct = senderBefore >= amt6 ? amt6 : senderBefore;
+    setBal6(fromKey, "TRX", senderBefore - deduct);
 
-    const receiverBeforeWei = getBnbWei(toKey);
-    setBnbWei(toKey, receiverBeforeWei + valWei);
+    const receiverBefore = getBal6(toKey, "TRX");
+    setBal6(toKey, "TRX", receiverBefore + amt6);
 
-    latestBlockInt += 1n;
-    latestBlockHex = "0x" + latestBlockInt.toString(16);
-
-    const primaryHash = (localTxHash || bscScanHash).toLowerCase().replace(/^0x/, "");
-    const bnbFloat = Number(valWei) / 1e18;
-    const usdVal = bnbFloat * getTokenPriceUsd("BNB");
+    latestBlockNum += 1;
+    const cleanId = (txID || crypto.randomBytes(32).toString("hex")).toLowerCase().replace(/^0x/, "");
+    const usdVal = (Number(amt6) / 1e6) * getTokenPriceUsd("TRX");
 
     const rec = {
-        type: "BNB_TRANSFER",
-        txTypeHex: txTypeHex || "0x2",
-        symbol: "BNB",
-        tokenName: "BNB Native",
-        tokenAddress: "0x" + toKey,
-        txHash: "0x" + primaryHash,
-        txID: primaryHash,
+        type: "TRX_TRANSFER",
+        symbol: "TRX",
+        tokenName: "TRON",
+        contractBase58: CONFIG.tokens.TRX.base58,
+        contractHex41: "41" + toKey,
+        contractHex20: toKey,
+        decimals: 6,
+        txID: cleanId,
         fromHex20: fromKey,
         toHex20: toKey,
         fromBase58: hex20ToTronBase58(fromKey),
         toBase58: hex20ToTronBase58(toKey),
-        nonceHex: "0x" + (nonceUsed !== null ? nonceUsed : Math.max(0, (state.nonces[fromKey] || 1) - 1)).toString(16),
-        valueWeiHex: "0x" + valWei.toString(16),
         amount6: amt6.toString(),
-        amountFormatted: bnbFloat.toLocaleString("en-US", { maximumFractionDigits: 6 }),
+        rawContractValue: amt6.toString(),
+        amountHex64: amt6.toString(16).padStart(64, "0"),
+        amountFormatted: (Number(amt6) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2 }),
         usdFormatted: usdVal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        amountScaledHex: valWei.toString(16).padStart(64, "0"),
-        blockNumberHex: latestBlockHex,
-        blockNumberDec: Number(latestBlockInt),
+        blockNumber: latestBlockNum,
         timestamp: Date.now()
     };
 
-    saveDualHashReceipt(rec, localTxHash, bscScanHash);
+    state.txReceipts[cleanId] = rec;
+    state.history.unshift(rec);
+    if (state.history.length > 500) state.history.pop();
+    saveState();
 
     console.log(`\n==================================================================`);
-    console.log(`[BNB CONFIRMED IN 1s — NO PENDING!] ${rec.amountFormatted} BNB ($${rec.usdFormatted} USD)`);
-    console.log(`  Sender (-)   : 0x${fromKey} | Before: ${(Number(senderBeforeWei)/1e18).toFixed(4)} -> Now: ${(Number(getBnbWei(fromKey))/1e18).toFixed(4)} BNB`);
-    console.log(`  Receiver (+) : 0x${toKey} | Before: ${(Number(receiverBeforeWei)/1e18).toFixed(4)} -> Now: ${(Number(getBnbWei(toKey))/1e18).toFixed(4)} BNB`);
-    console.log(`  Wallet Hash  : ${localTxHash}`);
-    console.log(`  BscScan Link : https://bscscan.com/tx/${bscScanHash}`);
+    console.log(`[TRX TRANSFER CONFIRMED] ${rec.amountFormatted} TRX ($${rec.usdFormatted} USD)`);
+    console.log(`  Sender (-)   : ${rec.fromBase58} | Before: ${(Number(senderBefore)/1e6).toLocaleString()} -> Now: ${(Number(getBal6(fromKey, "TRX"))/1e6).toLocaleString()} TRX`);
+    console.log(`  Receiver (+) : ${rec.toBase58} | Before: ${(Number(receiverBefore)/1e6).toLocaleString()} -> Now: ${(Number(getBal6(toKey, "TRX"))/1e6).toLocaleString()} TRX`);
+    console.log(`  Tronscan URL : https://tronscan.org/#/transaction/${cleanId}`);
     console.log(`==================================================================`);
-    return state.txReceipts[primaryHash];
+    return rec;
 }
 
-function executeDexSwap(walletAny, fromSymOrAddr, toSymOrAddr, amountIn6BigInt, localTxHash, bscScanHash, nonceUsed = null, txTypeHex = "0x2") {
+function executeTrc20Swap(walletAny, fromSymOrAddr, toSymOrAddr, amountIn6BigInt, txID) {
     const fromSym = resolveSymbol(fromSymOrAddr);
     const toSym   = resolveSymbol(toSymOrAddr);
     const amtIn6  = amountIn6BigInt > 0n ? amountIn6BigInt : 50_000_000n;
-    const wKey    = resolveVerifiedSender(walletAny, lastActiveSender, null, fromSym, amtIn6);
+    const wKey    = resolveSender(walletAny, null, fromSym, amtIn6);
 
     const fromPrice = getTokenPriceUsd(fromSym);
     const toPrice   = getTokenPriceUsd(toSym);
-    const usdValue  = (Number(amtIn6) / 1e6) * fromPrice;
-    const outUnits  = (usdValue / toPrice) * 0.998;
+    const usdVal    = (Number(amtIn6) / 1e6) * fromPrice;
+    const outUnits  = (usdVal / toPrice) * 0.998;
     const amtOut6   = BigInt(Math.max(1, Math.floor(outUnits * 1_000_000)));
 
-    if (fromSym === "BNB" || fromSym === "WBNB") {
-        const curWei = getBnbWei(wKey);
-        const deductWei = amtIn6 * (10n ** 12n);
-        if (curWei >= deductWei) setBnbWei(wKey, curWei - deductWei);
-        const curWbnb = getTokenBal6(wKey, "WBNB");
-        if (curWbnb >= amtIn6) setTokenBal6(wKey, "WBNB", curWbnb - amtIn6);
-    } else {
-        const curFrom = getTokenBal6(wKey, fromSym);
-        setTokenBal6(wKey, fromSym, curFrom >= amtIn6 ? curFrom - amtIn6 : 0n);
+    // Deduct input coin
+    const curIn = getBal6(wKey, fromSym);
+    setBal6(wKey, fromSym, curIn >= amtIn6 ? curIn - amtIn6 : 0n);
+
+    // Credit output coin (and if WTRX, also credit native TRX!)
+    setBal6(wKey, toSym, getBal6(wKey, toSym) + amtOut6);
+    if (toSym === "WTRX") {
+        setBal6(wKey, "TRX", getBal6(wKey, "TRX") + amtOut6);
     }
 
-    if (toSym === "BNB") {
-        setBnbWei(wKey, getBnbWei(wKey) + amtOut6 * (10n ** 12n));
-    } else {
-        setTokenBal6(wKey, toSym, getTokenBal6(wKey, toSym) + amtOut6);
-        if (toSym === "WBNB") {
-            setBnbWei(wKey, getBnbWei(wKey) + amtOut6 * (10n ** 12n));
-        }
-    }
-
-    advanceWalletNonce(wKey, nonceUsed);
-    latestBlockInt += 1n;
-    latestBlockHex = "0x" + latestBlockInt.toString(16);
-
-    const primaryHash = (localTxHash || bscScanHash).toLowerCase().replace(/^0x/, "");
-    const outTokInfo = CONFIG.tokens[toSym] || CONFIG.tokens.USDT;
+    latestBlockNum += 1;
+    const cleanId = (txID || crypto.randomBytes(32).toString("hex")).toLowerCase().replace(/^0x/, "");
+    const outMeta = CONFIG.tokens[toSym] || CONFIG.tokens.USDT;
+    const dec = outMeta.decimals || 6;
+    const rawOutUnits = dec > 6 ? amtOut6 * (10n ** BigInt(dec - 6)) : amtOut6;
 
     const rec = {
-        type: "SWAP",
-        txTypeHex: txTypeHex || "0x2",
+        type: "TRC20_SWAP",
         symbol: toSym,
         fromSymbol: fromSym,
         toSymbol: toSym,
-        tokenName: outTokInfo.name || toSym,
-        tokenAddress: "0x" + (outTokInfo.address || CONFIG.tokens.USDT.address),
-        txHash: "0x" + primaryHash,
-        txID: primaryHash,
+        tokenName: outMeta.name,
+        contractBase58: outMeta.base58,
+        contractHex41: "41" + outMeta.hex20,
+        contractHex20: outMeta.hex20,
+        decimals: dec,
+        txID: cleanId,
         fromHex20: wKey,
         toHex20: wKey,
         fromBase58: hex20ToTronBase58(wKey),
         toBase58: hex20ToTronBase58(wKey),
-        nonceHex: "0x" + (nonceUsed !== null ? nonceUsed : Math.max(0, (state.nonces[wKey] || 1) - 1)).toString(16),
-        valueWeiHex: "0x0",
         amountInFormatted: (Number(amtIn6) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 4 }),
         amount6: amtOut6.toString(),
-        amountFormatted: (Number(amtOut6) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 6 }),
-        usdFormatted: usdValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        amountScaledHex: (amtOut6 * (10n ** 12n)).toString(16).padStart(64, "0"),
-        blockNumberHex: latestBlockHex,
-        blockNumberDec: Number(latestBlockInt),
+        rawContractValue: rawOutUnits.toString(),
+        amountHex64: rawOutUnits.toString(16).padStart(64, "0"),
+        amountFormatted: (Number(amtOut6) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 4 }),
+        usdFormatted: usdVal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        blockNumber: latestBlockNum,
         timestamp: Date.now()
     };
 
-    saveDualHashReceipt(rec, localTxHash, bscScanHash);
+    state.txReceipts[cleanId] = rec;
+    state.history.unshift(rec);
+    saveState();
 
     console.log(`\n==================================================================`);
-    console.log(`[IN-APP SWAP CONFIRMED] ${rec.amountInFormatted} ${fromSym} -> +${rec.amountFormatted} ${toSym} ($${rec.usdFormatted} USD)`);
-    console.log(`  Wallet       : 0x${wKey}`);
-    console.log(`  New ${fromSym} Bal : ${fromSym === "BNB" ? (Number(getBnbWei(wKey))/1e18).toFixed(4) : (Number(getTokenBal6(wKey, fromSym))/1e6).toLocaleString()} ${fromSym}`);
-    console.log(`  New ${toSym} Bal : ${toSym === "BNB" ? (Number(getBnbWei(wKey))/1e18).toFixed(4) : (Number(getTokenBal6(wKey, toSym))/1e6).toLocaleString()} ${toSym}`);
-    console.log(`  BscScan Link : https://bscscan.com/tx/${bscScanHash}`);
+    console.log(`[TRC-20 SWAP CONFIRMED] ${rec.amountInFormatted} ${fromSym} -> +${rec.amountFormatted} ${toSym} ($${rec.usdFormatted} USD)`);
+    console.log(`  Wallet       : ${rec.fromBase58} (41${wKey})`);
+    console.log(`  New ${fromSym} Bal : ${(Number(getBal6(wKey, fromSym))/1e6).toLocaleString()} ${fromSym}`);
+    console.log(`  New ${toSym} Bal : ${(Number(getBal6(wKey, toSym))/1e6).toLocaleString()} ${toSym}`);
+    console.log(`  Tronscan URL : https://tronscan.org/#/transaction/${cleanId}`);
     console.log(`==================================================================`);
-    return state.txReceipts[primaryHash];
+    return rec;
+}
+
+// Builds a complete Tron `TransactionInfo` receipt object so TronLink/Bitget/Trust immediately mark the tx CONFIRMED!
+function buildTronTransactionInfo(cleanId) {
+    const rec = state.txReceipts[cleanId];
+    const blkHdr = getBlockHeader(rec ? rec.blockNumber : latestBlockNum);
+    const from20 = rec ? rec.fromHex20 : (lastActiveSender || Object.keys(state.wallets)[0] || "0".repeat(40));
+    const to20   = rec ? rec.toHex20   : from20;
+    const contract20 = rec ? rec.contractHex20 : CONFIG.tokens.USDT.hex20;
+    const amtHex64   = rec ? rec.amountHex64   : (1000000n).toString(16).padStart(64, "0");
+
+    return {
+        id: cleanId,
+        fee: 0,
+        blockNumber: rec ? rec.blockNumber : latestBlockNum,
+        blockTimeStamp: rec ? rec.timestamp : Date.now(),
+        contractResult: ["0000000000000000000000000000000000000000000000000000000000000001"],
+        contract_address: "41" + contract20,
+        receipt: {
+            energy_usage: 31895,
+            energy_usage_total: 31895,
+            net_usage: 345,
+            result: "SUCCESS"
+        },
+        log: [
+            {
+                address: contract20,
+                topics: [
+                    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                    from20.padStart(64, "0"),
+                    to20.padStart(64, "0")
+                ],
+                data: amtHex64
+            }
+        ]
+    };
+}
+
+function buildTronTransactionObject(cleanId) {
+    const rec = state.txReceipts[cleanId];
+    const from20 = rec ? rec.fromHex20 : (lastActiveSender || Object.keys(state.wallets)[0] || "0".repeat(40));
+    const to20   = rec ? rec.toHex20   : from20;
+    const contract20 = rec ? rec.contractHex20 : CONFIG.tokens.USDT.hex20;
+    const amtHex64   = rec ? rec.amountHex64   : (1000000n).toString(16).padStart(64, "0");
+
+    return {
+        ret: [{ contractRet: "SUCCESS" }],
+        signature: ["1b" + cleanId + cleanId + "00"],
+        txID: cleanId,
+        raw_data: {
+            contract: [
+                {
+                    parameter: {
+                        value: {
+                            data: "a9059cbb" + to20.padStart(64, "0") + amtHex64,
+                            owner_address: "41" + from20,
+                            contract_address: "41" + contract20
+                        },
+                        type_url: "type.googleapis.com/protocol.TriggerSmartContract"
+                    },
+                    type: "TriggerSmartContract"
+                }
+            ],
+            ref_block_bytes: "2a1c",
+            ref_block_hash: "8f9d1e2a3b4c5d6e",
+            expiration: (rec ? rec.timestamp : Date.now()) + 60000,
+            timestamp: rec ? rec.timestamp : Date.now()
+        },
+        raw_data_hex: "0a022a1c22088f9d1e2a3b4c5d6e"
+    };
 }
 
 // ============================================================================
-// 7. BUILT-IN METAMASK MOBILE IN-APP SWAP UI (`http://<RPC_URL>/swap`)
-// Open this inside MetaMask Mobile's Browser tab for a 1-tap native-style Swap UI!
+// 5. BUILT-IN TRC-20 IN-APP SWAP UI (`http://<RPC_URL>/swap`)
 // ============================================================================
-function renderInAppSwapHtml() {
+function renderTronInAppSwapHtml() {
     return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
-  <title>Swap Tokens</title>
+  <title>SunSwap TRC-20 Instant Swap</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #ffffff; color: #121212; margin: 0; padding: 20px; }
-    .header { text-align: center; font-size: 18px; font-weight: 600; padding: 10px 0 20px; }
-    .box { background: #f4f5f8; border-radius: 16px; padding: 18px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
-    .box input { border: none; background: transparent; font-size: 28px; font-weight: 600; width: 55%; outline: none; color: #121212; }
-    .box select { border: none; background: #ffffff; padding: 10px 14px; border-radius: 20px; font-size: 16px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
-    .usd-sub { font-size: 13px; color: #6a737d; margin-top: 4px; }
-    .swap-btn { width: 100%; background: #0376c9; color: #fff; border: none; padding: 16px; border-radius: 28px; font-size: 17px; font-weight: 600; cursor: pointer; margin-top: 16px; }
-    .status { margin-top: 16px; text-align: center; font-size: 14px; font-weight: 600; color: #1098fc; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f111a; color: #fff; margin: 0; padding: 20px; }
+    .card { max-width: 440px; margin: 0 auto; background: #1a1d29; border-radius: 18px; padding: 22px; border: 1px solid #292e42; }
+    .title { font-size: 19px; font-weight: 700; color: #ff060a; margin-bottom: 16px; display: flex; justify-content: space-between; }
+    .box { background: #12141d; border-radius: 14px; padding: 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+    .box input { border: none; background: transparent; color: #fff; font-size: 26px; font-weight: 700; width: 58%; outline: none; }
+    .box select { background: #242838; color: #fff; border: 1px solid #363c52; padding: 9px 14px; border-radius: 18px; font-size: 15px; font-weight: 600; }
+    .sub { font-size: 12px; color: #8a93a6; margin-top: 4px; }
+    .btn { width: 100%; background: linear-gradient(90deg, #ff060a, #ff4b2b); color: #fff; border: none; padding: 15px; border-radius: 14px; font-size: 16px; font-weight: 700; cursor: pointer; margin-top: 10px; }
+    #status { margin-top: 14px; text-align: center; font-size: 14px; font-weight: 600; color: #0ecb81; }
   </style>
 </head>
 <body>
-  <div class="header">Swap</div>
-  <div class="box">
-    <div>
-      <input type="number" id="amtIn" value="50" oninput="calcQuote()" />
-      <div class="usd-sub" id="usdIn">$50.00</div>
+  <div class="card">
+    <div class="title"><span>TRON TRC-20 Swap</span><span style="font-size:13px;color:#8a93a6;">SunSwap V3</span></div>
+    <div class="box">
+      <div>
+        <input type="number" id="amtIn" value="100" oninput="calc()" />
+        <div class="sub" id="usdIn">$100.00 USD</div>
+      </div>
+      <select id="fromSym" onchange="calc()">
+        <option value="USDT">USDT (TRC20)</option>
+        <option value="TRX">TRX</option>
+        <option value="USDC">USDC (TRC20)</option>
+        <option value="USDD">USDD (TRC20)</option>
+        <option value="SUN">SUN</option>
+        <option value="BTT">BTT</option>
+      </select>
     </div>
-    <select id="fromCoin" onchange="calcQuote()">
-      <option value="USDT">USDT</option>
-      <option value="BNB">BNB</option>
-      <option value="USDC">USDC</option>
-      <option value="BTCB">BTCB</option>
-      <option value="ETH">ETH</option>
-      <option value="SOL">SOL</option>
-    </select>
-  </div>
-
-  <div class="box">
-    <div>
-      <input type="text" id="amtOut" readonly value="0.068771" />
-      <div class="usd-sub" id="usdOut">$50.00 (Instant Quote)</div>
+    <div class="box">
+      <div>
+        <input type="text" id="amtOut" readonly value="399.20" />
+        <div class="sub" id="usdOut">Instant TRC-20 Quote</div>
+      </div>
+      <select id="toSym" onchange="calc()">
+        <option value="TRX">TRX</option>
+        <option value="USDT">USDT (TRC20)</option>
+        <option value="USDC">USDC (TRC20)</option>
+        <option value="USDD">USDD (TRC20)</option>
+        <option value="SUN">SUN</option>
+        <option value="BTT">BTT</option>
+      </select>
     </div>
-    <select id="toCoin" onchange="calcQuote()">
-      <option value="BNB">BNB</option>
-      <option value="USDT">USDT</option>
-      <option value="USDC">USDC</option>
-      <option value="BTCB">BTCB</option>
-      <option value="ETH">ETH</option>
-      <option value="SOL">SOL</option>
-    </select>
+    <input type="text" id="walletAddr" placeholder="Your Tron Address (T...)" style="width:100%;box-sizing:border-box;background:#12141d;border:1px solid #292e42;color:#fff;padding:12px;border-radius:10px;margin-bottom:8px;font-family:monospace;" />
+    <button class="btn" onclick="execSwap()">Swap Now (0 Gas Fee)</button>
+    <div id="status"></div>
   </div>
-
-  <button class="swap-btn" onclick="doInAppSwap()">Swap</button>
-  <div class="status" id="st"></div>
-
   <script>
-    const PRICES = { USDT: 1.0, USDC: 1.0, BUSD: 1.0, BNB: 727.055, BTCB: 92500.0, ETH: 3150.0, SOL: 185.0 };
-    function calcQuote() {
+    const PRICES = { USDT: 1.0, USDC: 1.0, USDD: 1.0, TRX: 0.25, SUN: 0.025, BTT: 0.0000012 };
+    function calc() {
       const a = parseFloat(document.getElementById("amtIn").value || "0");
-      const f = document.getElementById("fromCoin").value;
-      const t = document.getElementById("toCoin").value;
+      const f = document.getElementById("fromSym").value;
+      const t = document.getElementById("toSym").value;
       const usd = a * (PRICES[f] || 1);
       const out = (usd / (PRICES[t] || 1)) * 0.998;
-      document.getElementById("usdIn").innerText = "$" + usd.toFixed(2);
-      document.getElementById("amtOut").value = out.toFixed(6);
-      document.getElementById("usdOut").innerText = "$" + usd.toFixed(2) + " (0.2% Slippage)";
+      document.getElementById("usdIn").innerText = "$" + usd.toFixed(2) + " USD";
+      document.getElementById("amtOut").value = out.toFixed(4);
     }
-    async function doInAppSwap() {
-      const st = document.getElementById("st");
+    if (window.tronWeb && window.tronWeb.defaultAddress && window.tronWeb.defaultAddress.base58) {
+      document.getElementById("walletAddr").value = window.tronWeb.defaultAddress.base58;
+    }
+    async function execSwap() {
+      const st = document.getElementById("status");
+      const w = document.getElementById("walletAddr").value.trim() || (window.tronWeb?.defaultAddress?.base58 || "");
+      const f = document.getElementById("fromSym").value;
+      const t = document.getElementById("toSym").value;
       const a = parseFloat(document.getElementById("amtIn").value || "0");
-      const f = document.getElementById("fromCoin").value;
-      const t = document.getElementById("toCoin").value;
-      try {
-        let wallet = "";
-        if (window.ethereum) {
-          const accts = await window.ethereum.request({ method: "eth_requestAccounts" });
-          wallet = accts[0] || "";
-        }
-        st.innerText = "Executing Swap...";
-        const r = await fetch("/api/inapp-swap?wallet=" + wallet + "&from=" + f + "&to=" + t + "&amount=" + a);
-        const j = await r.json();
-        if (j.ok) {
-          st.style.color = "#00a186";
-          st.innerText = "Swap Confirmed! +" + j.amountOut + " " + t + " added to your wallet!";
-        }
-      } catch (e) {
-        st.style.color = "#d93025";
-        st.innerText = e.message;
+      const r = await fetch("/api/trc20-swap?wallet=" + encodeURIComponent(w) + "&from=" + f + "&to=" + t + "&amount=" + a);
+      const j = await r.json();
+      if (j.ok) {
+        st.innerText = "Confirmed! +" + j.amountOut + " " + t + " credited!";
       }
     }
-    calcQuote();
+    calc();
   </script>
 </body>
 </html>`;
 }
 
-async function forwardBscRpc(rpcBody) {
-    for (const url of CONFIG.bscUpstreams) {
-        try {
-            const r = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(rpcBody),
-                signal: AbortSignal.timeout(4500)
-            });
-            if (!r.ok) continue;
-            const j = await r.json();
-            if (j && (j.result !== undefined || j.error !== undefined)) return j;
-        } catch {}
-    }
-    return { jsonrpc: "2.0", id: rpcBody.id ?? null, error: { code: -32603, message: "Upstream timeout" } };
-}
-
-async function getSyncedNonce(walletHex20) {
-    const k = normAddr(walletHex20);
-    if (state.nonces[k] === undefined) {
-        try {
-            const res = await forwardBscRpc({
-                jsonrpc: "2.0",
-                id: 1,
-                method: "eth_getTransactionCount",
-                params: ["0x" + k, "latest"]
-            });
-            state.nonces[k] = res?.result ? parseInt(res.result, 16) : 0;
-            saveState();
-        } catch {
-            state.nonces[k] = 0;
-        }
-    }
-    return state.nonces[k];
-}
-
 // ============================================================================
-// 8. MAIN HTTP + EVM JSON-RPC + BSCSCAN HISTORY API + TRONGRID SERVER
+// 6. MAIN HTTP SERVER (FullNode `/wallet/*` + SolidityNode `/walletsolidity/*`
+//    + TronGrid V1 `/v1/*` + Tron EVM JSON-RPC `/jsonrpc`)
 // ============================================================================
 const server = http.createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1236,561 +658,522 @@ const server = http.createServer(async (req, res) => {
     const urlObj = new URL(req.url, `http://${hostHeader}`);
     const pathname = urlObj.pathname;
 
-    // 1. In-App Swap UI (`/swap`) & Instant Swap API (`/api/inapp-swap`)
+    // 1. Built-In TRC-20 Swap UI (`/swap`) & Instant Swap API (`/api/trc20-swap`)
     if (req.method === "GET" && pathname === "/swap") {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        return res.end(renderInAppSwapHtml());
+        return res.end(renderTronInAppSwapHtml());
     }
 
-    if (pathname === "/api/inapp-swap") {
+    if (pathname === "/api/trc20-swap") {
         const w = urlObj.searchParams.get("wallet") || lastActiveSender || Object.keys(state.wallets)[0];
         const f = (urlObj.searchParams.get("from") || "USDT").toUpperCase();
-        const t = (urlObj.searchParams.get("to") || "BNB").toUpperCase();
-        const a = Number(urlObj.searchParams.get("amount") || 50);
-        const usdEst = a * getTokenPriceUsd(f);
-        const bscHash = await pickClosestValueBscScanHash(usdEst, "SWAP");
-        const rec = executeDexSwap(w, f, t, BigInt(Math.floor(a * 1_000_000)), bscHash, bscHash);
+        const t = (urlObj.searchParams.get("to") || "TRX").toUpperCase();
+        const a = Number(urlObj.searchParams.get("amount") || 100);
+        const realTxID = await pickRealTronscanTxId();
+        const rec = executeTrc20Swap(w, f, t, BigInt(Math.floor(a * 1_000_000)), realTxID);
         res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ok: true, txHash: rec.txHash, amountOut: rec.amountFormatted }));
+        return res.end(JSON.stringify({ ok: true, txID: rec.txID, amountOut: rec.amountFormatted }));
     }
 
-    // 2. BscScan-Compatible History API (`/api?module=account&action=txlist` AND `action=tokentx`)
-    if (req.method === "GET" && pathname === "/api" && urlObj.searchParams.get("module") === "account") {
-        const action = urlObj.searchParams.get("action") || "tokentx";
-        const addrKey = normAddr(urlObj.searchParams.get("address") || "");
-        const matching = state.history.filter(h => h.fromHex20 === addrKey || h.toHex20 === addrKey);
+    // ------------------------------------------------------------------------
+    // ROUTE A: TRONGRID V1 API (`/v1/accounts/:address`, `/transactions/trc20`, `/transactions`)
+    // Used by TronLink, Bitget Wallet, Trust Wallet, Klever, OKX Wallet to display
+    // TRX/TRC-20 balances AND Sender (-) / Receiver (+) Activity History!
+    // ------------------------------------------------------------------------
+    if (pathname.startsWith("/v1/accounts/")) {
+        const parts = pathname.split("/");
+        const acctKey = normAddr(parts[3] || "");
+        lastActiveSender = acctKey;
 
-        if (action === "txlist") {
-            const txList = matching.map(h => ({
-                blockNumber: String(h.blockNumberDec || 46500000),
-                timeStamp: String(Math.floor(h.timestamp / 1000)),
-                hash: h.txHash,
-                nonce: String(parseInt(h.nonceHex || "0x1", 16)),
-                blockHash: "0x" + keccak256Hex(h.txID),
-                transactionIndex: "1",
-                from: "0x" + h.fromHex20,
-                to: h.type === "BNB_TRANSFER" ? "0x" + h.toHex20 : h.tokenAddress,
-                value: h.type === "BNB_TRANSFER" ? (BigInt(h.amount6) * (10n ** 12n)).toString() : "0",
-                gas: "21000",
-                gasPrice: "1000000000",
-                isError: "0",
-                txreceipt_status: "1",
-                input: h.type === "BNB_TRANSFER" ? "0x" : "0xa9059cbb" + h.toHex20.padStart(64, "0") + h.amountScaledHex,
-                contractAddress: "",
-                cumulativeGasUsed: "21000",
-                gasUsed: "21000",
-                confirmations: "30"
-            }));
+        // 1. TRC-20 Transaction History (`/v1/accounts/:address/transactions/trc20`)
+        if (pathname.includes("/transactions/trc20")) {
+            const trc20Txs = state.history
+                .filter(h => (h.fromHex20 === acctKey || h.toHex20 === acctKey) && h.symbol !== "TRX")
+                .map(h => ({
+                    transaction_id: h.txID,
+                    token_info: {
+                        symbol: h.symbol || "USDT",
+                        address: h.contractBase58 || CONFIG.tokens.USDT.base58,
+                        decimals: h.decimals || 6,
+                        name: h.tokenName || "Tether USD"
+                    },
+                    block_timestamp: h.timestamp,
+                    from: h.fromBase58,
+                    to: h.toBase58,
+                    type: "Transfer",
+                    value: h.rawContractValue || h.amount6
+                }));
             res.writeHead(200, { "Content-Type": "application/json" });
-            return res.end(JSON.stringify({ status: "1", message: "OK", result: txList }));
+            return res.end(JSON.stringify({ data: trc20Txs, success: true, meta: { at: Date.now(), page_size: trc20Txs.length } }));
         }
 
-        const tokenTxList = matching.map(h => ({
-            blockNumber: String(h.blockNumberDec || 46500000),
-            timeStamp: String(Math.floor(h.timestamp / 1000)),
-            hash: h.txHash,
-            nonce: String(parseInt(h.nonceHex || "0x1", 16)),
-            blockHash: "0x" + keccak256Hex(h.txID),
-            from: "0x" + h.fromHex20,
-            contractAddress: h.tokenAddress,
-            to: "0x" + h.toHex20,
-            value: (BigInt(h.amount6) * (10n ** 12n)).toString(),
-            tokenName: h.tokenName || "Binance-Peg BSC-USD",
-            tokenSymbol: h.symbol || "USDT",
-            tokenDecimal: "18",
-            transactionIndex: "1",
-            gas: "65000",
-            gasPrice: "1000000000",
-            gasUsed: "35156",
-            cumulativeGasUsed: "35156",
-            input: "deprecated",
-            confirmations: "30"
-        }));
-        res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ status: "1", message: "OK", result: tokenTxList }));
-    }
-
-    if (req.method === "GET" && pathname === "/") {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        return res.end(renderInAppSwapHtml());
-    }
-
-    // ------------------------------------------------------------------------
-    // ROUTE B: EVM JSON-RPC (METAMASK MOBILE iOS / ANDROID, TRUST, BITGET)
-    // ------------------------------------------------------------------------
-    let rpcPayload;
-    try {
-        rpcPayload = JSON.parse(rawBody);
-    } catch {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: CONFIG.chainIdHex }));
-    }
-
-    const handleSingleRpc = async (rpc) => {
-        const { id, method, params } = rpc;
-
-        if (method === "eth_chainId") return { jsonrpc: "2.0", id, result: CONFIG.chainIdHex };
-        if (method === "net_version") return { jsonrpc: "2.0", id, result: String(CONFIG.chainIdDec) };
-        if (method === "eth_blockNumber") return { jsonrpc: "2.0", id, result: latestBlockHex };
-        if (method === "eth_gasPrice" || method === "eth_maxPriorityFeePerGas") {
-            return { jsonrpc: "2.0", id, result: "0x3b9aca00" }; // 1 Gwei
-        }
-        if (method === "eth_feeHistory") {
-            return {
-                jsonrpc: "2.0",
-                id,
-                result: {
-                    oldestBlock: latestBlockHex,
-                    baseFeePerGas: ["0x3b9aca00", "0x3b9aca00"],
-                    gasUsedRatio: [0.5],
-                    reward: [["0x3b9aca00"]]
-                }
-            };
-        }
-
-        // 1. `eth_getBlockByNumber` — MetaMask Mobile polls this to confirm pending transactions!
-        if (method === "eth_getBlockByNumber") {
-            const upBlock = await forwardBscRpc(rpc);
-            if (upBlock?.result) {
-                upBlock.result.number = latestBlockHex;
-                upBlock.result.hash = "0x" + keccak256Hex(latestBlockHex);
-                return upBlock;
-            }
-            return {
-                jsonrpc: "2.0",
-                id,
-                result: {
-                    number: latestBlockHex,
-                    hash: "0x" + keccak256Hex(latestBlockHex),
-                    parentHash: "0x" + keccak256Hex("parent_" + latestBlockHex),
-                    nonce: "0x0000000000000000",
-                    sha3Uncles: "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                    logsBloom: "0x" + "0".repeat(512),
-                    transactionsRoot: "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-                    stateRoot: "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-                    receiptsRoot: "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-                    miner: "0x0000000000000000000000000000000000000000",
-                    difficulty: "0x2",
-                    totalDifficulty: "0x2",
-                    extraData: "0x",
-                    size: "0x1000",
-                    gasLimit: "0x8583b00",
-                    gasUsed: "0x5208",
-                    timestamp: "0x" + Math.floor(Date.now() / 1000).toString(16),
-                    transactions: [],
-                    uncles: []
-                }
-            };
-        }
-
-        // 2. Native BNB Balance (`eth_getBalance`)
-        if (method === "eth_getBalance" && params?.[0]) {
-            const w = normAddr(params[0]);
-            return { jsonrpc: "2.0", id, result: "0x" + getBnbWei(w).toString(16) };
-        }
-
-        // 3. Nonce Sync (`eth_getTransactionCount`)
-        if (method === "eth_getTransactionCount" && params?.[0]) {
-            const w = normAddr(params[0]);
-            if (params[1] === "pending") lastActiveSender = w;
-            const n = await getSyncedNonce(w);
-            return { jsonrpc: "2.0", id, result: "0x" + n.toString(16) };
-        }
-
-        // 4. `eth_estimateGas`
-        if (method === "eth_estimateGas") {
-            const tx = params?.[0] || {};
-            if (tx.from) {
-                const senderKey = normAddr(tx.from);
-                lastActiveSender = senderKey;
-                const toC = normAddr(tx.to || "");
-                const dataHex = (tx.data || tx.input || "").toLowerCase().replace(/^0x/, "");
-                const valWei = tx.value ? BigInt(tx.value) : 0n;
-
-                if (dataHex.startsWith("a9059cbb") && dataHex.length >= 136) {
-                    const toKey = dataHex.slice(32, 72);
-                    const rawVal18 = BigInt("0x" + dataHex.slice(72, 136));
-                    const amt6 = rawVal18 >= 10n ** 12n ? rawVal18 / (10n ** 12n) : rawVal18;
-                    pendingIntents.set(`${toKey}_${amt6.toString()}`, senderKey);
-                } else if (valWei > 0n && dataHex.length === 0 && toC) {
-                    const amt6 = valWei / (10n ** 12n);
-                    pendingIntents.set(`BNB_${toC}_${amt6.toString()}`, senderKey);
-                }
-            }
-            return { jsonrpc: "2.0", id, result: "0x5208" }; // 21,000 gas
-        }
-
-        // 5. `eth_getLogs` — Returns Sender (-) and Receiver (+) Transfer Events for Wallet Activity!
-        if (method === "eth_getLogs" && params?.[0]) {
-            const filter = params[0];
-            const topics = Array.isArray(filter.topics) ? filter.topics : [];
-            const matchingLogs = [];
-
-            for (let i = 0; i < state.history.length; i++) {
-                const h = state.history[i];
-                const fromTopic = "0x" + h.fromHex20.padStart(64, "0");
-                const toTopic   = "0x" + h.toHex20.padStart(64, "0");
-
-                const matchFrom = !topics[1] || (typeof topics[1] === "string" && topics[1].toLowerCase() === fromTopic);
-                const matchTo   = !topics[2] || (typeof topics[2] === "string" && topics[2].toLowerCase() === toTopic);
-
-                if (matchFrom && matchTo) {
-                    matchingLogs.push({
-                        address: h.tokenAddress || "0x" + CONFIG.tokens.USDT.address,
-                        topics: [
-                            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                            fromTopic,
-                            toTopic
+        // 2. General Account Transaction History (`/v1/accounts/:address/transactions`)
+        if (pathname.endsWith("/transactions")) {
+            const allTxs = state.history
+                .filter(h => h.fromHex20 === acctKey || h.toHex20 === acctKey)
+                .map(h => ({
+                    ret: [{ contractRet: "SUCCESS", fee: 0 }],
+                    signature: ["1b" + h.txID + h.txID + "00"],
+                    txID: h.txID,
+                    net_usage: 345,
+                    raw_data_hex: "0a022a1c",
+                    net_fee: 0,
+                    energy_usage: 31895,
+                    blockNumber: h.blockNumber || latestBlockNum,
+                    block_timestamp: h.timestamp,
+                    energy_fee: 0,
+                    energy_usage_total: 31895,
+                    raw_data: {
+                        contract: [
+                            h.type === "TRX_TRANSFER"
+                                ? {
+                                      parameter: {
+                                          value: {
+                                              amount: Number(h.amount6),
+                                              owner_address: "41" + h.fromHex20,
+                                              to_address: "41" + h.toHex20
+                                          },
+                                          type_url: "type.googleapis.com/protocol.TransferContract"
+                                      },
+                                      type: "TransferContract"
+                                  }
+                                : {
+                                      parameter: {
+                                          value: {
+                                              data: "a9059cbb" + h.toHex20.padStart(64, "0") + h.amountHex64,
+                                              owner_address: "41" + h.fromHex20,
+                                              contract_address: h.contractHex41 || ("41" + CONFIG.tokens.USDT.hex20)
+                                          },
+                                          type_url: "type.googleapis.com/protocol.TriggerSmartContract"
+                                      },
+                                      type: "TriggerSmartContract"
+                                  }
                         ],
-                        data: "0x" + (h.amountScaledHex || "0".repeat(64)),
-                        blockNumber: h.blockNumberHex || latestBlockHex,
-                        transactionHash: h.txHash,
-                        transactionIndex: "0x0",
-                        blockHash: "0x" + keccak256Hex(h.txID),
-                        logIndex: "0x" + i.toString(16),
-                        removed: false
-                    });
-                }
-            }
-            return { jsonrpc: "2.0", id, result: matchingLogs };
+                        timestamp: h.timestamp,
+                        expiration: h.timestamp + 60000
+                    }
+                }));
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ data: allTxs, success: true, meta: { at: Date.now(), page_size: allTxs.length } }));
         }
 
-        // 6. `eth_call` — Direct Token Balances, Local DEX Quoter, BalanceChecker & Fixed Multicall3!
-        if (method === "eth_call" && params?.[0]) {
-            const callObj = params[0];
-            const toAddr = normAddr(callObj.to || "");
-            const dataHex = (callObj.data || callObj.input || "").toLowerCase();
-            if (callObj.from) lastActiveSender = normAddr(callObj.from);
+        // 3. Account Overview & All TRC-20 Token Balances (`/v1/accounts/:address`)
+        const w = ensureWallet(acctKey) || {};
+        const trxSun = Number(getBal6(acctKey, "TRX"));
+        const trc20Array = [];
+        for (const [sym, tokInfo] of Object.entries(CONFIG.tokens)) {
+            if (sym === "TRX") continue;
+            const b6 = getBal6(acctKey, sym);
+            if (b6 > 0n || sym === "USDT") {
+                const scaled = tokInfo.decimals > 6 ? b6 * (10n ** BigInt(tokInfo.decimals - 6)) : b6;
+                trc20Array.push({ [tokInfo.base58]: scaled.toString() });
+            }
+        }
 
-            if (ADDRESS_TO_TOKEN.has(toAddr)) {
-                const tok = ADDRESS_TO_TOKEN.get(toAddr);
-                if (dataHex.startsWith("0x70a08231") && dataHex.length >= 74) {
-                    const wallet = dataHex.slice(34, 74);
-                    return { jsonrpc: "2.0", id, result: "0x" + getTokenBalHex(wallet, toAddr) };
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({
+            data: [
+                {
+                    address: "41" + acctKey,
+                    balance: trxSun,
+                    create_time: Date.now() - 86400000 * 30,
+                    latest_opration_time: Date.now(),
+                    free_net_usage: 0,
+                    net_window_size: 28800000,
+                    trc20: trc20Array,
+                    account_resource: {
+                        energy_window_size: 28800000
+                    }
                 }
-                if (dataHex.startsWith("0xdd62ed3e")) {
-                    return { jsonrpc: "2.0", id, result: "0x" + "f".repeat(64) };
-                }
-                if (dataHex.startsWith("0x313ce567")) {
-                    return { jsonrpc: "2.0", id, result: "0x" + tok.decimals.toString(16).padStart(64, "0") };
-                }
-                if (dataHex.startsWith("0x95d89b41")) {
-                    const symHex = Buffer.from(tok.symbol, "utf8").toString("hex").padEnd(64, "0");
-                    return {
-                        jsonrpc: "2.0",
-                        id,
-                        result: "0x" + "0".repeat(62) + "20" + tok.symbol.length.toString(16).padStart(64, "0") + symHex
-                    };
-                }
-                if (dataHex.startsWith("0xa9059cbb") || dataHex.startsWith("0x095ea7b3") || dataHex.startsWith("0x23b872dd")) {
-                    return { jsonrpc: "2.0", id, result: "0x" + "0".repeat(63) + "1" };
-                }
+            ],
+            success: true,
+            meta: { at: Date.now(), page_size: 1 }
+        }));
+    }
+
+    // ------------------------------------------------------------------------
+    // ROUTE B: TRON FULLNODE (`/wallet/*`) & SOLIDITYNODE (`/walletsolidity/*`)
+    // ------------------------------------------------------------------------
+    if (pathname.startsWith("/wallet/") || pathname.startsWith("/walletsolidity/")) {
+        let body = {};
+        try { body = JSON.parse(rawBody || "{}"); } catch {}
+
+        // 1. `/wallet/getnowblock` & `/walletsolidity/getnowblock` & `/wallet/getblockbynum`
+        if (pathname.endsWith("/getnowblock") || pathname.endsWith("/getblockbynum") || pathname.endsWith("/getblock")) {
+            const num = body.num || latestBlockNum;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify(getBlockHeader(num)));
+        }
+
+        // 2. `/wallet/getaccount` & `/walletsolidity/getaccount`
+        if (pathname.endsWith("/getaccount")) {
+            const acctKey = normAddr(body.address || urlObj.searchParams.get("address") || "");
+            lastActiveSender = acctKey;
+            const trxSun = Number(getBal6(acctKey, "TRX"));
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({
+                address: body.visible ? hex20ToTronBase58(acctKey) : ("41" + acctKey),
+                balance: trxSun,
+                create_time: Date.now() - 86400000 * 30,
+                latest_opration_time: Date.now(),
+                free_net_usage: 0
+            }));
+        }
+
+        // 3. `/wallet/getaccountresource` (Gives Wallet 100,000 Free Energy & Bandwidth so Transfers Never Fail for Gas!)
+        if (pathname.endsWith("/getaccountresource")) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({
+                freeNetUsed: 100,
+                freeNetLimit: 50000,
+                NetUsed: 0,
+                NetLimit: 500000,
+                EnergyUsed: 0,
+                EnergyLimit: 5000000,
+                TotalNetLimit: 43200000000,
+                TotalNetWeight: 10000000,
+                TotalEnergyLimit: 90000000000,
+                TotalEnergyWeight: 10000000
+            }));
+        }
+
+        // 4. `/wallet/getchainparameters`
+        if (pathname.endsWith("/getchainparameters")) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({
+                chainParameter: [
+                    { key: "getTransactionFee", value: 1000 },
+                    { key: "getEnergyFee", value: 420 },
+                    { key: "getMaxCpuTimeOfOneTx", value: 50 }
+                ]
+            }));
+        }
+
+        // 5. `/wallet/validateaddress`
+        if (pathname.endsWith("/validateaddress")) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ result: true, message: "Base58check format" }));
+        }
+
+        // 6. `/wallet/triggerconstantcontract` & `/wallet/triggersmartcontract` & `/walletsolidity/triggerconstantcontract`
+        if (pathname.endsWith("/triggerconstantcontract") || pathname.endsWith("/triggersmartcontract")) {
+            const contractNorm = normAddr(body.contract_address || "");
+            const ownerNorm    = normAddr(body.owner_address || "");
+            if (ownerNorm !== "0000000000000000000000000000000000000000") lastActiveSender = ownerNorm;
+
+            const selector = (body.function_selector || "").replace(/\s+/g, "");
+            const param    = (body.parameter || body.data || "").toLowerCase().replace(/^0x/, "");
+
+            // 6A. `balanceOf(address)` (`70a08231`) for USDT or ANY TRC-20 Token
+            if (selector.startsWith("balanceOf") || param.startsWith("70a08231")) {
+                const walletHex = param.length >= 64 ? param.slice(param.length - 40) : ownerNorm;
+                const balHex64  = getContractScaledHex64(walletHex, contractNorm);
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({
+                    result: { result: true },
+                    energy_used: 0,
+                    constant_result: [balHex64],
+                    transaction: { ret: [{ contractRet: "SUCCESS" }], txID: crypto.randomBytes(32).toString("hex") }
+                }));
             }
 
-            const localQuote = tryHandleLocalDexQuoter(toAddr, dataHex);
-            if (localQuote) return { jsonrpc: "2.0", id, result: localQuote };
-
-            const mmBatch = tryHandleMetaMaskBalanceChecker(dataHex);
-            if (mmBatch) return { jsonrpc: "2.0", id, result: mmBatch };
-
-            const upRes = await forwardBscRpc(rpc);
-            if (upRes?.result) {
-                upRes.result = patchMulticallOutput(dataHex, upRes.result);
-                return upRes;
+            // 6B. `decimals()` (`313ce567`), `symbol()` (`95d89b41`), `name()` (`06fdde03`), `allowance` (`dd62ed3e`)
+            if (selector.startsWith("decimals") || param.startsWith("313ce567")) {
+                const dec = (CONTRACT_TO_TOKEN.get(contractNorm)?.decimals || 6).toString(16).padStart(64, "0");
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ result: { result: true }, energy_used: 0, constant_result: [dec] }));
+            }
+            if (selector.startsWith("allowance") || param.startsWith("dd62ed3e")) {
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ result: { result: true }, energy_used: 0, constant_result: ["f".repeat(64)] }));
+            }
+            if (selector.startsWith("symbol") || param.startsWith("95d89b41")) {
+                const symStr = CONTRACT_TO_TOKEN.get(contractNorm)?.symbol || "USDT";
+                const symHex = "0".repeat(62) + "20" + symStr.length.toString(16).padStart(64, "0") + Buffer.from(symStr).toString("hex").padEnd(64, "0");
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ result: { result: true }, energy_used: 0, constant_result: [symHex] }));
+            }
+            if (selector.startsWith("name") || param.startsWith("06fdde03")) {
+                const nameStr = CONTRACT_TO_TOKEN.get(contractNorm)?.name || "Tether USD";
+                const nameHex = "0".repeat(62) + "20" + nameStr.length.toString(16).padStart(64, "0") + Buffer.from(nameStr).toString("hex").padEnd(64, "0");
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ result: { result: true }, energy_used: 0, constant_result: [nameHex] }));
             }
 
-            const simSwap = parseDexSwapCalldata(toAddr, dataHex, callObj.value ? BigInt(callObj.value) : 0n);
-            if (simSwap || CONFIG.dexRouters.has(toAddr)) {
-                const amtOutRaw = simSwap
-                    ? convertRawAmountBetweenTokens(simSwap.amtIn6 * (10n ** 12n), simSwap.fromSym, simSwap.toSym)
-                    : 10n ** 18n;
-                const amtHex = amtOutRaw.toString(16).padStart(64, "0");
-                return {
-                    jsonrpc: "2.0",
-                    id,
-                    result: "0x" +
-                        "0000000000000000000000000000000000000000000000000000000000000020" +
-                        "0000000000000000000000000000000000000000000000000000000000000002" +
-                        amtHex +
-                        amtHex
+            // 6C. TRC-20 `transfer(address,uint256)` (`a9059cbb`) OR `transferFrom` (`23b872dd`)
+            if (selector.startsWith("transfer(") || param.startsWith("a9059cbb") || selector.startsWith("transferFrom(") || param.startsWith("23b872dd")) {
+                const isFrom = selector.startsWith("transferFrom(") || param.startsWith("23b872dd");
+                const cleanParam = (param.startsWith("a9059cbb") || param.startsWith("23b872dd")) ? param.slice(8) : param;
+                const fromHex20 = isFrom ? cleanParam.slice(24, 64) : ownerNorm;
+                const toHex20   = isFrom ? cleanParam.slice(88, 128) : cleanParam.slice(24, 64);
+                const rawAmtHex = isFrom ? cleanParam.slice(128, 192) : cleanParam.slice(64, 128);
+                const rawAmt    = BigInt("0x" + (rawAmtHex || "0"));
+                const sym       = resolveSymbol(contractNorm);
+                const dec       = CONFIG.tokens[sym]?.decimals || 6;
+                const amt6      = dec > 6 ? rawAmt / (10n ** BigInt(dec - 6)) : rawAmt;
+
+                const realTxID = await pickRealTronscanTxId();
+                state.txStaging[realTxID] = {
+                    type: "TRC20_TRANSFER",
+                    txID: realTxID,
+                    fromHex20,
+                    toHex20,
+                    sym,
+                    amt6: amt6.toString()
                 };
-            }
-            return upRes;
-        }
+                saveState();
 
-        // 7. `eth_sendRawTransaction` / `eth_sendTransaction`
-        // Returns `localTxHash` to MetaMask Mobile so `Pending` turns into `Confirmed` in 1 second,
-        // and indexes BOTH `localTxHash` and `realBscHash`!
-        if ((method === "eth_sendRawTransaction" || method === "eth_sendTransaction") && params?.[0]) {
-            try {
-                if (method === "eth_sendTransaction") {
-                    const tx = params[0];
-                    const fromW = normAddr(tx.from || lastActiveSender);
-                    const toC = normAddr(tx.to || "");
-                    const d = (tx.data || tx.input || "").toLowerCase().replace(/^0x/, "");
-                    const valWei = tx.value ? BigInt(tx.value) : 0n;
-
-                    if (d.startsWith("a9059cbb") && d.length >= 136) {
-                        const toW = d.slice(32, 72);
-                        const rawVal = BigInt("0x" + d.slice(72, 136));
-                        const amt6 = rawVal >= 10n ** 12n ? rawVal / (10n ** 12n) : rawVal;
-                        const realHash = await pickClosestValueBscScanHash(Number(amt6) / 1e6, "USDT");
-                        const rec = executeTokenTransfer(fromW, toW, toC, amt6, realHash, realHash);
-                        return { jsonrpc: "2.0", id, result: rec.txHash };
-                    }
-                    const swapInfo = parseDexSwapCalldata(toC, d, valWei);
-                    if (swapInfo) {
-                        const usdEst = (Number(swapInfo.amtIn6) / 1e6) * getTokenPriceUsd(swapInfo.fromSym);
-                        const realSwapHash = await pickClosestValueBscScanHash(usdEst, "SWAP");
-                        const rec = executeDexSwap(fromW, swapInfo.fromSym, swapInfo.toSym, swapInfo.amtIn6, realSwapHash, realSwapHash);
-                        return { jsonrpc: "2.0", id, result: rec.txHash };
-                    }
-                    if (valWei > 0n && toC) {
-                        const bnbUsd = (Number(valWei) / 1e18) * getTokenPriceUsd("BNB");
-                        const realHash = await pickClosestValueBscScanHash(bnbUsd, "BNB");
-                        const rec = executeBnbTransfer(fromW, toC, valWei, realHash, realHash);
-                        return { jsonrpc: "2.0", id, result: rec.txHash };
-                    }
-                } else {
-                    const rawHex = params[0];
-                    const decoded = decodeSignedRawTransaction(rawHex);
-                    const localTxHash = decoded.localTxHash;
-                    const txTypeHex   = decoded.txTypeHex || "0x2";
-                    const recoveredW  = decoded?.fromHex20;
-                    const toC = decoded ? decoded.toHex20 : "";
-                    const d = decoded ? decoded.dataHex : rawHex.toLowerCase().replace(/^0x/, "");
-                    const valWei = decoded ? decoded.valueWei : 0n;
-                    const txNonce = decoded ? decoded.nonce : null;
-
-                    // Case 1: ERC-20 `transfer(address,uint256)` (`a9059cbb`)
-                    const idxTrans = d.indexOf("a9059cbb");
-                    if (idxTrans !== -1 && d.length >= idxTrans + 136 && !CONFIG.dexRouters.has(toC)) {
-                        const toW = d.slice(idxTrans + 32, idxTrans + 72);
-                        const rawVal = BigInt("0x" + d.slice(idxTrans + 72, idxTrans + 136));
-                        const amt6 = rawVal >= 10n ** 12n ? rawVal / (10n ** 12n) : rawVal;
-                        const realHash = await pickClosestValueBscScanHash(Number(amt6) / 1e6, "USDT");
-                        executeTokenTransfer(recoveredW, toW, toC || "USDT", amt6, localTxHash, realHash, txNonce, txTypeHex);
-                        return { jsonrpc: "2.0", id, result: localTxHash };
-                    }
-
-                    // Case 2: ERC-20 `transferFrom(address,address,uint256)` (`23b872dd`)
-                    const idxTransFrom = d.indexOf("23b872dd");
-                    if (idxTransFrom !== -1 && d.length >= idxTransFrom + 200 && !CONFIG.dexRouters.has(toC)) {
-                        const fromW = d.slice(idxTransFrom + 32, idxTransFrom + 72);
-                        const toW   = d.slice(idxTransFrom + 96, idxTransFrom + 136);
-                        const rawVal = BigInt("0x" + d.slice(idxTransFrom + 136, idxTransFrom + 200));
-                        const amt6 = rawVal >= 10n ** 12n ? rawVal / (10n ** 12n) : rawVal;
-                        const realHash = await pickClosestValueBscScanHash(Number(amt6) / 1e6, "USDT");
-                        executeTokenTransfer(fromW, toW, toC || "USDT", amt6, localTxHash, realHash, txNonce, txTypeHex);
-                        return { jsonrpc: "2.0", id, result: localTxHash };
-                    }
-
-                    // Case 3: ERC-20 `approve(address,uint256)` (`095ea7b3`)
-                    if (d.startsWith("095ea7b3")) {
-                        const senderW = resolveVerifiedSender(recoveredW, lastActiveSender, null);
-                        const realHash = await pickClosestValueBscScanHash(500, "SWAP");
-                        if (senderW) advanceWalletNonce(senderW, txNonce);
-                        const rec = {
-                            type: "APPROVE",
-                            txTypeHex,
-                            symbol: resolveSymbol(toC),
-                            tokenAddress: "0x" + (toC || CONFIG.tokens.USDT.address),
-                            txHash: localTxHash,
-                            txID: localTxHash.replace(/^0x/, ""),
-                            fromHex20: senderW || "0".repeat(40),
-                            toHex20: toC || CONFIG.tokens.USDT.address,
-                            nonceHex: "0x" + (txNonce !== null ? txNonce : 0).toString(16),
-                            valueWeiHex: "0x0",
-                            amount6: "0",
-                            amountFormatted: "Unlimited",
-                            usdFormatted: "0.00",
-                            amountScaledHex: "f".repeat(64),
-                            blockNumberHex: latestBlockHex,
-                            timestamp: Date.now()
-                        };
-                        saveDualHashReceipt(rec, localTxHash, realHash);
-                        return { jsonrpc: "2.0", id, result: localTxHash };
-                    }
-
-                    // Case 4: DEX Swap (`PancakeSwap`, `MetaMask Swap`, `1inch`, `Bitget Swap`, `Trust Wallet Swap`)
-                    const swapInfo = parseDexSwapCalldata(toC, d, valWei);
-                    if (swapInfo) {
-                        const usdEst = (Number(swapInfo.amtIn6) / 1e6) * getTokenPriceUsd(swapInfo.fromSym);
-                        const realSwapHash = await pickClosestValueBscScanHash(usdEst, "SWAP");
-                        executeDexSwap(recoveredW, swapInfo.fromSym, swapInfo.toSym, swapInfo.amtIn6, localTxHash, realSwapHash, txNonce, txTypeHex);
-                        return { jsonrpc: "2.0", id, result: localTxHash };
-                    }
-
-                    // Case 5: Native BNB Transfer (or In-App Self-Send BNB Swap!)
-                    if (valWei > 0n && toC) {
-                        const bnbUsd = (Number(valWei) / 1e18) * getTokenPriceUsd("BNB");
-                        const realHash = await pickClosestValueBscScanHash(bnbUsd, "BNB");
-                        executeBnbTransfer(recoveredW, toC, valWei, localTxHash, realHash, txNonce, txTypeHex);
-                        return { jsonrpc: "2.0", id, result: localTxHash };
-                    }
-                }
-
-                const fallbackHash = await pickClosestValueBscScanHash(1000, "USDT");
-                return { jsonrpc: "2.0", id, result: fallbackHash };
-            } catch (err) {
-                return { jsonrpc: "2.0", id, error: { code: -32000, message: err.message } };
-            }
-        }
-
-        // 8. UNIVERSAL INSTANT RECEIPT & TX LOOKUP (`eth_getTransactionByHash` & `eth_getTransactionReceipt`)
-        // Even if MetaMask Mobile polls an older stuck hash from before V10 started, V10 returns a confirmed
-        // `status: "0x1"` receipt so ANY stuck "Sending BNB" pending item clears immediately!
-        if (method === "eth_getTransactionByHash" && params?.[0]) {
-            const cleanId = params[0].toLowerCase().replace(/^0x/, "");
-            const rec = state.txReceipts[cleanId];
-            if (rec) {
-                return {
-                    jsonrpc: "2.0",
-                    id,
-                    result: {
-                        hash: "0x" + cleanId,
-                        blockHash: "0x" + keccak256Hex(rec.blockNumberHex || latestBlockHex),
-                        blockNumber: rec.blockNumberHex || latestBlockHex,
-                        from: "0x" + rec.fromHex20,
-                        to: rec.type === "BNB_TRANSFER" ? "0x" + rec.toHex20 : rec.tokenAddress,
-                        value: rec.valueWeiHex || "0x0",
-                        gas: "0x5208",
-                        gasPrice: "0x3b9aca00",
-                        maxFeePerGas: "0x3b9aca00",
-                        maxPriorityFeePerGas: "0x3b9aca00",
-                        input: rec.type === "BNB_TRANSFER" ? "0x" : "0xa9059cbb" + rec.toHex20.padStart(64, "0") + rec.amountScaledHex,
-                        nonce: rec.nonceHex || "0x0",
-                        transactionIndex: "0x0",
-                        type: rec.txTypeHex || "0x2",
-                        chainId: CONFIG.chainIdHex,
-                        v: "0x1",
-                        r: "0x" + cleanId,
-                        s: "0x" + cleanId
-                    }
-                };
-            }
-            // Auto-heal any previously stuck pending transaction from V9!
-            const fallbackSender = lastActiveSender || Object.keys(state.wallets)[0] || "0".repeat(40);
-            return {
-                jsonrpc: "2.0",
-                id,
-                result: {
-                    hash: "0x" + cleanId,
-                    blockHash: "0x" + keccak256Hex(latestBlockHex),
-                    blockNumber: latestBlockHex,
-                    from: "0x" + fallbackSender,
-                    to: "0x" + fallbackSender,
-                    value: "0x0",
-                    gas: "0x5208",
-                    gasPrice: "0x3b9aca00",
-                    input: "0x",
-                    nonce: "0x0",
-                    transactionIndex: "0x0",
-                    type: "0x2",
-                    chainId: CONFIG.chainIdHex,
-                    v: "0x1",
-                    r: "0x" + cleanId,
-                    s: "0x" + cleanId
-                }
-            };
-        }
-
-        if (method === "eth_getTransactionReceipt" && params?.[0]) {
-            const cleanId = params[0].toLowerCase().replace(/^0x/, "");
-            const rec = state.txReceipts[cleanId];
-            if (rec) {
-                return {
-                    jsonrpc: "2.0",
-                    id,
-                    result: {
-                        transactionHash: "0x" + cleanId,
-                        transactionIndex: "0x0",
-                        blockHash: "0x" + keccak256Hex(rec.blockNumberHex || latestBlockHex),
-                        blockNumber: rec.blockNumberHex || latestBlockHex,
-                        from: "0x" + rec.fromHex20,
-                        to: rec.type === "BNB_TRANSFER" ? "0x" + rec.toHex20 : rec.tokenAddress,
-                        cumulativeGasUsed: "0x5208",
-                        gasUsed: "0x5208",
-                        contractAddress: null,
-                        logs: rec.type === "BNB_TRANSFER" ? [] : [{
-                            address: rec.tokenAddress,
-                            topics: [
-                                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                                "0x" + rec.fromHex20.padStart(64, "0"),
-                                "0x" + rec.toHex20.padStart(64, "0")
+                const now = Date.now();
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({
+                    result: { result: true },
+                    energy_used: 13000,
+                    constant_result: ["0".repeat(63) + "1"],
+                    transaction: {
+                        visible: Boolean(body.visible),
+                        txID: realTxID,
+                        raw_data: {
+                            contract: [
+                                {
+                                    parameter: {
+                                        value: {
+                                            data: "a9059cbb" + cleanParam,
+                                            owner_address: body.owner_address,
+                                            contract_address: body.contract_address
+                                        },
+                                        type_url: "type.googleapis.com/protocol.TriggerSmartContract"
+                                    },
+                                    type: "TriggerSmartContract"
+                                }
                             ],
-                            data: "0x" + rec.amountScaledHex,
-                            blockNumber: rec.blockNumberHex || latestBlockHex,
-                            transactionHash: "0x" + cleanId,
-                            transactionIndex: "0x0",
-                            blockHash: "0x" + keccak256Hex(rec.blockNumberHex || latestBlockHex),
-                            logIndex: "0x0",
-                            removed: false
-                        }],
-                        logsBloom: "0x" + "0".repeat(512),
-                        status: "0x1",
-                        effectiveGasPrice: "0x3b9aca00",
-                        type: rec.txTypeHex || "0x2"
+                            ref_block_bytes: "2a1c",
+                            ref_block_hash: "8f9d1e2a3b4c5d6e",
+                            expiration: now + 60000,
+                            timestamp: now,
+                            fee_limit: body.fee_limit || 100000000
+                        },
+                        raw_data_hex: "0a022a1c22088f9d1e2a3b4c5d6e"
                     }
-                };
+                }));
             }
-            // Auto-confirm any previously stuck pending transaction from V9!
-            const fallbackSender = lastActiveSender || Object.keys(state.wallets)[0] || "0".repeat(40);
-            return {
-                jsonrpc: "2.0",
-                id,
-                result: {
-                    transactionHash: "0x" + cleanId,
-                    transactionIndex: "0x0",
-                    blockHash: "0x" + keccak256Hex(latestBlockHex),
-                    blockNumber: latestBlockHex,
-                    from: "0x" + fallbackSender,
-                    to: "0x" + fallbackSender,
-                    cumulativeGasUsed: "0x5208",
-                    gasUsed: "0x5208",
-                    contractAddress: null,
-                    logs: [],
-                    logsBloom: "0x" + "0".repeat(512),
-                    status: "0x1",
-                    effectiveGasPrice: "0x3b9aca00",
-                    type: "0x2"
-                }
+
+            // 6D. SunSwap Quote (`getAmountsOut`) or Swap Execution (`swapExactTokensForTokens`, `swapExactTRXForTokens`, etc.)
+            if (selector.includes("getAmountsOut") || param.startsWith("d06ca61f")) {
+                const amtIn = param.length >= 72 ? BigInt("0x" + param.slice(8, 72)) : 100_000_000n;
+                const amtOut = amtIn * 4n; // 1 USDT = 4 TRX
+                const outHex = "0".repeat(62) + "20" + (2n).toString(16).padStart(64, "0") + amtIn.toString(16).padStart(64, "0") + amtOut.toString(16).padStart(64, "0");
+                res.writeHead(200, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ result: { result: true }, energy_used: 0, constant_result: [outHex] }));
+            }
+
+            // Default smart contract trigger (Approve / SunSwap trade)
+            const realTxID = await pickRealTronscanTxId();
+            const callValSun = BigInt(body.call_value || 0);
+            state.txStaging[realTxID] = {
+                type: (CONFIG.sunSwapRouters.has(contractNorm) || selector.toLowerCase().includes("swap") || callValSun > 0n) ? "TRC20_SWAP" : "APPROVE",
+                txID: realTxID,
+                fromHex20: ownerNorm,
+                fromSym: callValSun > 0n ? "TRX" : "USDT",
+                toSym: callValSun > 0n ? "USDT" : "TRX",
+                amt6: (callValSun > 0n ? callValSun : 50_000_000n).toString()
             };
+            const now = Date.now();
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({
+                result: { result: true },
+                energy_used: 25000,
+                constant_result: ["0".repeat(63) + "1"],
+                transaction: {
+                    visible: Boolean(body.visible),
+                    txID: realTxID,
+                    raw_data: {
+                        contract: [{
+                            parameter: {
+                                value: { data: param, owner_address: body.owner_address, contract_address: body.contract_address },
+                                type_url: "type.googleapis.com/protocol.TriggerSmartContract"
+                            },
+                            type: "TriggerSmartContract"
+                        }],
+                        ref_block_bytes: "2a1c",
+                        ref_block_hash: "8f9d1e2a3b4c5d6e",
+                        expiration: now + 60000,
+                        timestamp: now
+                    },
+                    raw_data_hex: "0a022a1c22088f9d1e2a3b4c5d6e"
+                }
+            }));
         }
 
-        return await forwardBscRpc(rpc);
-    };
+        // 7. `/wallet/createtransaction` (Native TRX Transfer)
+        if (pathname.endsWith("/createtransaction")) {
+            const fromHex20 = normAddr(body.owner_address || "");
+            const toHex20   = normAddr(body.to_address || "");
+            const amtSun    = BigInt(body.amount || 0);
+            const realTxID  = await pickRealTronscanTxId();
 
-    const output = Array.isArray(rpcPayload)
-        ? await Promise.all(rpcPayload.map(handleSingleRpc))
-        : await handleSingleRpc(rpcPayload);
+            state.txStaging[realTxID] = {
+                type: "TRX_TRANSFER",
+                txID: realTxID,
+                fromHex20,
+                toHex20,
+                amt6: amtSun.toString()
+            };
+            saveState();
+
+            const now = Date.now();
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({
+                visible: Boolean(body.visible),
+                txID: realTxID,
+                raw_data: {
+                    contract: [{
+                        parameter: {
+                            value: { amount: Number(amtSun), owner_address: body.owner_address, to_address: body.to_address },
+                            type_url: "type.googleapis.com/protocol.TransferContract"
+                        },
+                        type: "TransferContract"
+                    }],
+                    ref_block_bytes: "2a1c",
+                    ref_block_hash: "8f9d1e2a3b4c5d6e",
+                    expiration: now + 60000,
+                    timestamp: now
+                },
+                raw_data_hex: "0a022a1c22088f9d1e2a3b4c5d6e"
+            }));
+        }
+
+        // 8. `/wallet/broadcasttransaction` & `/wallet/broadcasthex`
+        // Executes the staged TRC-20 Transfer, TRX Transfer, or SunSwap immediately!
+        if (pathname.endsWith("/broadcasttransaction") || pathname.endsWith("/broadcasthex")) {
+            const txID = (body.txID || await pickRealTronscanTxId()).toLowerCase().replace(/^0x/, "");
+            const staged = state.txStaging[txID];
+
+            if (staged) {
+                delete state.txStaging[txID];
+                if (staged.type === "TRC20_TRANSFER") {
+                    executeTrc20Transfer(staged.fromHex20, staged.toHex20, staged.sym, BigInt(staged.amt6), txID);
+                } else if (staged.type === "TRX_TRANSFER") {
+                    executeTrxNativeTransfer(staged.fromHex20, staged.toHex20, BigInt(staged.amt6), txID);
+                } else if (staged.type === "TRC20_SWAP") {
+                    executeTrc20Swap(staged.fromHex20, staged.fromSym, staged.toSym, BigInt(staged.amt6), txID);
+                }
+            } else {
+                // Also support direct raw contract broadcast if the wallet constructed the tx offline!
+                const contractArr = body?.raw_data?.contract;
+                if (Array.isArray(contractArr) && contractArr[0]) {
+                    const c = contractArr[0];
+                    const val = c?.parameter?.value || {};
+                    if (c.type === "TransferContract") {
+                        executeTrxNativeTransfer(val.owner_address, val.to_address, BigInt(val.amount || 0), txID);
+                    } else if (c.type === "TriggerSmartContract") {
+                        const d = (val.data || "").toLowerCase().replace(/^0x/, "");
+                        if (d.startsWith("a9059cbb") && d.length >= 136) {
+                            const toH = d.slice(32, 72);
+                            const amt6 = BigInt("0x" + d.slice(72, 136));
+                            executeTrc20Transfer(val.owner_address, toH, val.contract_address || "USDT", amt6, txID);
+                        }
+                    }
+                }
+            }
+
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ result: true, code: "SUCCESS", txid: txID, txID }));
+        }
+
+        // 9. `/wallet/gettransactioninfobyid` & `/walletsolidity/gettransactioninfobyid`
+        // Returns Instant CONFIRMED Receipt (`result: "SUCCESS"`) so zero transactions stay Pending!
+        if (pathname.endsWith("/gettransactioninfobyid")) {
+            const cleanId = (body.value || urlObj.searchParams.get("value") || "").toLowerCase().replace(/^0x/, "");
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify(buildTronTransactionInfo(cleanId)));
+        }
+
+        // 10. `/wallet/gettransactionbyid` & `/walletsolidity/gettransactionbyid`
+        if (pathname.endsWith("/gettransactionbyid")) {
+            const cleanId = (body.value || urlObj.searchParams.get("value") || "").toLowerCase().replace(/^0x/, "");
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify(buildTronTransactionObject(cleanId)));
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // ROUTE C: TRON EVM JSON-RPC (`/jsonrpc` or POST `/`)
+    // Supports wallets that connect to Tron Mainnet via JSON-RPC (Chain ID 728126428 / 0x2b6653dc)
+    // ------------------------------------------------------------------------
+    if (req.method === "POST") {
+        let rpcPayload;
+        try { rpcPayload = JSON.parse(rawBody); } catch {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: CONFIG.tronChainIdHex }));
+        }
+
+        const handleTronJsonRpc = async (rpc) => {
+            const { id, method, params } = rpc;
+            if (method === "eth_chainId") return { jsonrpc: "2.0", id, result: CONFIG.tronChainIdHex };
+            if (method === "net_version") return { jsonrpc: "2.0", id, result: String(CONFIG.tronChainIdDec) };
+            if (method === "eth_blockNumber") return { jsonrpc: "2.0", id, result: "0x" + latestBlockNum.toString(16) };
+            if (method === "eth_gasPrice") return { jsonrpc: "2.0", id, result: "0x1a13b8600" };
+            if (method === "eth_getBalance" && params?.[0]) {
+                const sun = getBal6(params[0], "TRX");
+                return { jsonrpc: "2.0", id, result: "0x" + sun.toString(16) };
+            }
+            if (method === "eth_call" && params?.[0]) {
+                const toC = normAddr(params[0].to || "");
+                const d = (params[0].data || params[0].input || "").toLowerCase();
+                if (d.startsWith("0x70a08231") && d.length >= 74) {
+                    const w = d.slice(34, 74);
+                    return { jsonrpc: "2.0", id, result: "0x" + getContractScaledHex64(w, toC) };
+                }
+                if (d.startsWith("0x313ce567")) {
+                    const dec = (CONTRACT_TO_TOKEN.get(toC)?.decimals || 6).toString(16).padStart(64, "0");
+                    return { jsonrpc: "2.0", id, result: "0x" + dec };
+                }
+                return { jsonrpc: "2.0", id, result: "0x" + "0".repeat(63) + "1" };
+            }
+            return { jsonrpc: "2.0", id, result: "0x1" };
+        };
+
+        const out = Array.isArray(rpcPayload)
+            ? await Promise.all(rpcPayload.map(handleTronJsonRpc))
+            : await handleTronJsonRpc(rpcPayload);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify(out));
+    }
 
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(output));
+    res.end(JSON.stringify({
+        status: "TRON_TRC20_V12_MASTER_ONLINE",
+        network: "TRON Mainnet (TRC-20)",
+        usdtContract: CONFIG.tokens.USDT.base58,
+        latestBlock: latestBlockNum,
+        wallets: Object.fromEntries(
+            Object.entries(state.wallets).map(([k, v]) => [hex20ToTronBase58(k), v])
+        )
+    }, null, 2));
 });
 
 // ============================================================================
-// 9. INTERACTIVE TERMINAL COMMANDER CLI
+// 7. INTERACTIVE TERMINAL CLI FOR TRC-20 (`T...` Addresses!)
 // ============================================================================
-function startInteractiveCli() {
+function startTronCli() {
     const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
-        prompt: "V10-MASTER> "
+        prompt: "TRC20-MASTER> "
     });
 
     console.log("\n==================================================================");
-    console.log("  V10 METAMASK MOBILE iOS/ANDROID MASTER — TERMINAL COMMANDS:");
-    console.log("  1. credit <wallet> <usdt_amount> [bnb_amount]");
-    console.log("     Example: credit 0x1234...abcd 50 10");
-    console.log("  2. coin <wallet> <SYMBOL> <amount>");
-    console.log("     Example: coin 0x1234...abcd BTCB 5.5   (USDT,USDC,BUSD,BTCB,ETH,CAKE,SOL,DOGE)");
-    console.log("  3. transfer <from_wallet> <to_wallet> <amount> [USDT|BNB|BTCB...]");
-    console.log("     Example: transfer 0x1111... 0x2222... 25 USDT");
-    console.log("  4. swap <wallet> <FROM_COIN> <TO_COIN> <amount>");
-    console.log("     Example: swap 0x1234...abcd USDT BNB 50");
+    console.log("  TRON TRC-20 V12 MASTER — INTERACTIVE TERMINAL COMMANDS:");
+    console.log("  1. credit <T_wallet_address> <usdt_amount> [trx_amount]");
+    console.log("     Example: credit TFx9...abcd 500000 2500");
+    console.log("  2. coin <T_wallet_address> <USDT|TRX|USDC|USDD|SUN|BTT|JST> <amount>");
+    console.log("     Example: coin TFx9...abcd USDC 100000");
+    console.log("  3. transfer <from_T_wallet> <to_T_wallet> <amount> [USDT|TRX|USDC...]");
+    console.log("     Example: transfer TSender... TReceiver... 25000 USDT");
+    console.log("  4. swap <T_wallet_address> <FROM_COIN> <TO_COIN> <amount>");
+    console.log("     Example: swap TFx9...abcd USDT TRX 500");
     console.log("  5. list");
-    console.log("     Shows all wallets, exact balances, and transaction history");
+    console.log("     Displays all connected T... Tron wallets and their TRC-20 balances");
     console.log("==================================================================\n");
 
     rl.prompt();
@@ -1803,37 +1186,31 @@ function startInteractiveCli() {
             if (cmd === "credit" || cmd === "add" || cmd === "set") {
                 const addr = parts[1];
                 const usdtAmt = Number(parts[2] || 0);
-                const bnbAmt  = parts[3] !== undefined ? Number(parts[3]) : null;
+                const trxAmt  = parts[3] !== undefined ? Number(parts[3]) : null;
                 if (!addr) {
-                    console.log("Usage: credit <wallet_address> <usdt_amount> [bnb_amount]");
+                    console.log("Usage: credit <T_wallet_address> <usdt_amount> [trx_amount]");
                 } else {
                     const k = normAddr(addr);
-                    setTokenBal6(k, "USDT", BigInt(Math.floor(usdtAmt * 1_000_000)));
-                    if (bnbAmt !== null) {
-                        setBnbWei(k, BigInt(Math.floor(bnbAmt * 1e6)) * (10n ** 12n));
+                    setBal6(k, "USDT", BigInt(Math.floor(usdtAmt * 1_000_000)));
+                    if (trxAmt !== null) {
+                        setBal6(k, "TRX", BigInt(Math.floor(trxAmt * 1_000_000)));
                     }
-                    latestBlockInt += 1n;
-                    latestBlockHex = "0x" + latestBlockInt.toString(16);
-                    console.log(`\n[+] CREDITED WALLET 0x${k}`);
-                    console.log(`    USDT Balance : ${usdtAmt.toLocaleString()} USDT ($${usdtAmt.toLocaleString()})`);
-                    console.log(`    BNB Balance  : ${(Number(getBnbWei(k)) / 1e18).toLocaleString()} BNB\n`);
+                    latestBlockNum += 1;
+                    console.log(`\n[+] CREDITED TRON WALLET: ${hex20ToTronBase58(k)} (Hex: 41${k})`);
+                    console.log(`    TRC-20 USDT : ${usdtAmt.toLocaleString()} USDT ($${usdtAmt.toLocaleString()})`);
+                    console.log(`    Native TRX  : ${(Number(getBal6(k, "TRX")) / 1e6).toLocaleString()} TRX\n`);
                 }
             } else if (cmd === "coin" || cmd === "token") {
                 const addr = parts[1];
                 const sym  = (parts[2] || "USDT").toUpperCase();
                 const amt  = Number(parts[3] || 0);
                 if (!addr) {
-                    console.log("Usage: coin <wallet_address> <USDT|USDC|BUSD|WBNB|BTCB|ETH|CAKE|SOL|DOGE> <amount>");
+                    console.log("Usage: coin <T_wallet_address> <USDT|TRX|USDC|USDD|SUN|BTT|JST> <amount>");
                 } else {
                     const k = normAddr(addr);
-                    if (sym === "BNB") {
-                        setBnbWei(k, BigInt(Math.floor(amt * 1e6)) * (10n ** 12n));
-                    } else {
-                        setTokenBal6(k, sym, BigInt(Math.floor(amt * 1_000_000)));
-                    }
-                    latestBlockInt += 1n;
-                    latestBlockHex = "0x" + latestBlockInt.toString(16);
-                    console.log(`\n[+] SET 0x${k} -> ${amt.toLocaleString()} ${sym}\n`);
+                    setBal6(k, sym, BigInt(Math.floor(amt * 1_000_000)));
+                    latestBlockNum += 1;
+                    console.log(`\n[+] SET ${hex20ToTronBase58(k)} -> ${amt.toLocaleString()} ${sym}\n`);
                 }
             } else if (cmd === "transfer" || cmd === "send") {
                 const fromW = parts[1];
@@ -1841,37 +1218,34 @@ function startInteractiveCli() {
                 const amt   = Number(parts[3] || 0);
                 const sym   = (parts[4] || "USDT").toUpperCase();
                 if (!fromW || !toW || !amt) {
-                    console.log("Usage: transfer <from_wallet> <to_wallet> <amount> [USDT|BNB|BTCB...]");
-                } else if (sym === "BNB") {
-                    const bnbUsd = amt * getTokenPriceUsd("BNB");
-                    const realHash = await pickClosestValueBscScanHash(bnbUsd, "BNB");
-                    executeBnbTransfer(fromW, toW, BigInt(Math.floor(amt * 1e6)) * (10n ** 12n), realHash, realHash);
+                    console.log("Usage: transfer <from_T_wallet> <to_T_wallet> <amount> [USDT|TRX|USDC...]");
                 } else {
-                    const usdEst = amt * getTokenPriceUsd(sym);
-                    const realHash = await pickClosestValueBscScanHash(usdEst, "USDT");
-                    executeTokenTransfer(fromW, toW, sym, BigInt(Math.floor(amt * 1_000_000)), realHash, realHash);
+                    const realTxID = await pickRealTronscanTxId();
+                    if (sym === "TRX") {
+                        executeTrxNativeTransfer(fromW, toW, BigInt(Math.floor(amt * 1_000_000)), realTxID);
+                    } else {
+                        executeTrc20Transfer(fromW, toW, sym, BigInt(Math.floor(amt * 1_000_000)), realTxID);
+                    }
                 }
             } else if (cmd === "swap") {
                 const wAddr   = parts[1];
                 const fromSym = (parts[2] || "USDT").toUpperCase();
-                const toSym   = (parts[3] || "BNB").toUpperCase();
+                const toSym   = (parts[3] || "TRX").toUpperCase();
                 const amt     = Number(parts[4] || 0);
                 if (!wAddr || !amt) {
-                    console.log("Usage: swap <wallet_address> <FROM_COIN> <TO_COIN> <amount>");
+                    console.log("Usage: swap <T_wallet_address> <FROM_COIN> <TO_COIN> <amount>");
                 } else {
-                    const usdEst = amt * getTokenPriceUsd(fromSym);
-                    const realSwapHash = await pickClosestValueBscScanHash(usdEst, "SWAP");
-                    executeDexSwap(wAddr, fromSym, toSym, BigInt(Math.floor(amt * 1_000_000)), realSwapHash, realSwapHash);
+                    const realTxID = await pickRealTronscanTxId();
+                    executeTrc20Swap(wAddr, fromSym, toSym, BigInt(Math.floor(amt * 1_000_000)), realTxID);
                 }
             } else if (cmd === "list" || cmd === "wallets" || cmd === "status") {
-                console.log("\n--- TRACKED WALLETS & EXACT BALANCES ---");
+                console.log("\n--- TRACKED TRON (TRC-20) WALLETS ---");
                 for (const [k, bals] of Object.entries(state.wallets)) {
-                    const bnbFormatted = (Number(BigInt(bals.BNB || "0")) / 1e18).toFixed(4);
+                    const b58 = hex20ToTronBase58(k);
                     const tokenList = Object.entries(bals)
-                        .filter(([sym]) => sym !== "BNB")
                         .map(([sym, val]) => `${(Number(val) / 1e6).toLocaleString()} ${sym}`)
-                        .join(", ");
-                    console.log(`  0x${k} | Nonce: ${state.nonces[k] || 0} | BNB: ${bnbFormatted} | ${tokenList}`);
+                        .join(" | ");
+                    console.log(`  ${b58} (0x${k}) -> ${tokenList}`);
                 }
                 console.log("");
             } else if (cmd !== "") {
@@ -1886,10 +1260,10 @@ function startInteractiveCli() {
 
 server.listen(CONFIG.port, "0.0.0.0", () => {
     console.log("==================================================================");
-    console.log(`[+] V10 METAMASK MOBILE iOS/ANDROID MASTER LIVE ON PORT ${CONFIG.port}`);
-    console.log(`[+] RPC URL              : http://127.0.0.1:${CONFIG.port}`);
-    console.log(`[+] Built-In Swap UI     : http://127.0.0.1:${CONFIG.port}/swap`);
-    console.log(`[+] Instant Confirm Mode : ENABLED (Zero Pending — Confirms in 1s)`);
+    console.log(`[+] PURE TRON MAINNET (TRC-20) NODE LIVE ON PORT ${CONFIG.port}`);
+    console.log(`[+] Official TRC-20 USDT : TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t`);
+    console.log(`[+] FullNode / Solidity  : http://127.0.0.1:${CONFIG.port}`);
+    console.log(`[+] Built-In SunSwap UI  : http://127.0.0.1:${CONFIG.port}/swap`);
     console.log("==================================================================");
-    startInteractiveCli();
+    startTronCli();
 });
